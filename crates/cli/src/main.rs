@@ -87,42 +87,36 @@ fn parse_interval(s: &str) -> Duration {
 fn top(watch: Option<String>, json: bool, limit: usize, sort: &str) -> anyhow::Result<()> {
     let mut collector = Collector::new();
 
-    // Sampel pertama hanya untuk mengisi baseline delta.
-    let first = collector.sample();
-    if json && watch.is_none() {
-        print_json(&first)?;
-        return Ok(());
-    }
+    // Sampel pertama hanya untuk mengisi baseline delta; tanpa itu semua CPU%
+    // akan 0 karena tidak ada pembanding.
+    let _baseline = collector.sample();
 
-    if let Some(interval_str) = watch {
-        let interval = parse_interval(&interval_str);
-        let mut ticker = core_pulse_core::sampler::Ticker::new(interval);
-        loop {
-            ticker.tick();
+    match watch {
+        Some(interval_str) => {
+            let interval = parse_interval(&interval_str);
+            let mut ticker = core_pulse_core::sampler::Ticker::new(interval);
+            loop {
+                ticker.tick();
+                let snap = collector.sample();
+                if json {
+                    print_json(&snap)?;
+                } else {
+                    print_table(&snap, limit, sort);
+                }
+            }
+        }
+        None => {
+            // Beri jendela 500 ms supaya CPU% punya arti, termasuk untuk --json.
+            std::thread::sleep(Duration::from_millis(500));
             let snap = collector.sample();
             if json {
                 print_json(&snap)?;
             } else {
                 print_table(&snap, limit, sort);
             }
-            if interval > Duration::ZERO && snap.seq > 0 && at_exit_requested() {
-                break;
-            }
-        }
-    } else {
-        std::thread::sleep(Duration::from_millis(500));
-        let snap = collector.sample();
-        if json {
-            print_json(&snap)?;
-        } else {
-            print_table(&snap, limit, sort);
         }
     }
     Ok(())
-}
-
-fn at_exit_requested() -> bool {
-    false
 }
 
 fn print_json(snap: &Snapshot) -> anyhow::Result<()> {
@@ -131,7 +125,10 @@ fn print_json(snap: &Snapshot) -> anyhow::Result<()> {
 }
 
 fn print_table(snap: &Snapshot, limit: usize, sort: &str) {
-    let mut rows: Vec<&core_pulse_core::ProcessRow> = snap.processes.iter().collect();
+    // PID 0 adalah idle: menampilkannya sebagai "proses paling rakus CPU" hanya
+    // menyesatkan. Task Manager juga tidak menampilkannya di tab Processes.
+    let mut rows: Vec<&core_pulse_core::ProcessRow> =
+        snap.processes.iter().filter(|p| p.pid != 0).collect();
     match sort {
         "mem" => rows.sort_by_key(|r| std::cmp::Reverse(r.mem_private_bytes)),
         "name" => rows.sort_by_key(|r| r.name.to_lowercase()),
