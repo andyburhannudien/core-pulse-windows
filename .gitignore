@@ -1,0 +1,13 @@
+/target
+**/*.rs.bk
+*.pdb
+*.exe
+!tests/fixtures/**/*.exe
+
+# Artefak lokal
+/artifacts
+/dist
+/out
+*.log
+*.png
+!docs/**/*.png

@@ -1,0 +1,8 @@
+# Clippy: ketat untuk library, toleran untuk UI (egui banyak menerima &mut Ui).
+disallowed-methods = [
+    { path = "std::process::exit", reason = "gunakan alur Result supaya cleanup berjalan" },
+]
+
+disallowed-types = [
+    { path = "std::sync::Mutex", reason = "gunakan parking_lot::Mutex; std Mutex tidak punya try_lock beralasan" },
+]

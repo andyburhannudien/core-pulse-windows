@@ -1,0 +1,28 @@
+[package]
+name = "core-pulse-ui"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "core-pulse"
+path = "src/main.rs"
+
+[dependencies]
+core-pulse-core = { workspace = true }
+core-pulse-sensors = { workspace = true }
+anyhow = { workspace = true }
+arc-swap = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+eframe = { version = "0.37", default-features = false, features = [
+    "glow",
+    "default_fonts",
+    "system_fonts",
+    "accesskit",
+    "clipboard",
+    "links",
+] }
+egui_extras = "0.37"
+egui_plot = "0.38"

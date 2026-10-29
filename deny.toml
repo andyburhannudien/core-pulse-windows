@@ -1,0 +1,42 @@
+[graph]
+targets = [
+    { triple = "x86_64-pc-windows-msvc" },
+]
+
+[advisories]
+version = 2
+db-urls = ["https://github.com/rustsec/advisory-db"]
+yanked = "deny"
+ignore = []
+
+[licenses]
+version = 2
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-3.0",
+    "Zlib",
+    "MPL-2.0",
+    "CC0-1.0",
+    "0BSD",
+]
+confidence-threshold = 0.9
+exceptions = []
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+deny = [
+    # Driver ring0 yang diblokir Microsoft (CVE-2020-14979). Lihat ADR-0002.
+    { name = "winring0" },
+    { name = "winring0-sys" },
+]
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

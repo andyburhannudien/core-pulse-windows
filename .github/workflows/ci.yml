@@ -1,0 +1,73 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+
+jobs:
+  check:
+    name: fmt + clippy + test
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Format
+        run: cargo fmt --all --check
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: Test
+        run: cargo test --workspace --all-targets
+      - name: Doc
+        run: cargo doc --workspace --no-deps
+        env:
+          RUSTDOCFLAGS: -D warnings
+
+  deny:
+    name: cargo deny
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check advisories licenses bans sources
+
+  build:
+    name: release build + budget
+    runs-on: windows-latest
+    needs: check
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build
+        run: cargo build --release --workspace
+      - name: Ukuran biner (batas 20 MB)
+        shell: pwsh
+        run: |
+          $limit = 20MB
+          Get-ChildItem target/release/*.exe | ForEach-Object {
+            "{0}: {1:N2} MB" -f $_.Name, ($_.Length / 1MB)
+            if ($_.Length -gt $limit) { throw "$($_.Name) melebihi batas $limit" }
+          }
+      - name: Budget performa (Gate G0)
+        shell: pwsh
+        run: |
+          # Runner CI 2x lebih lambat; batas keras dilonggarkan sesuai docs/PERF.md.
+          $out = ./target/release/core-pulse-cli.exe bench --seconds 20
+          $out
+          if ($out -match "WARN") { throw "budget performa terlampaui" }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: core-pulse-windows-x64
+          path: |
+            target/release/core-pulse.exe
+            target/release/core-pulse-cli.exe
