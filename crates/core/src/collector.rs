@@ -1,8 +1,88 @@
 //! Collector: menyatukan semua sumber menjadi satu `Snapshot`.
 
-use crate::model::{Degradation, DegradeReason, HostInfo, Snapshot};
+use crate::model::{
+    Degradation, DegradeReason, HostInfo, ServiceRow, SessionRow, Snapshot, StartupEntry,
+};
 use crate::sys;
+use std::sync::Arc;
 use std::time::Instant;
+
+/// Service dan startup berubah jarang dan mahal untuk dibaca (SCM + registry),
+/// jadi diperbarui setiap 15 detik di thread terpisah. Kalau dibaca di sampler
+/// thread, satu siklus bisa 150 ms dan melanggar budget (terukur di P2).
+const SLOW_REFRESH: std::time::Duration = std::time::Duration::from_secs(15);
+
+/// Data yang berubah lambat, dibagikan lewat `ArcSwap`.
+#[derive(Debug, Clone, Default)]
+pub struct SlowData {
+    pub services: Vec<ServiceRow>,
+    pub startup: Vec<StartupEntry>,
+    pub degraded: Vec<Degradation>,
+}
+
+/// Wadah `SlowData` yang aman dibaca tanpa lock.
+pub struct SlowStore {
+    inner: arc_swap::ArcSwap<SlowData>,
+}
+
+impl Default for SlowStore {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl SlowStore {
+    pub fn new() -> Self {
+        Self {
+            inner: arc_swap::ArcSwap::from_pointee(SlowData::default()),
+        }
+    }
+
+    pub fn load(&self) -> arc_swap::Guard<Arc<SlowData>> {
+        self.inner.load()
+    }
+
+    pub fn store(&self, data: SlowData) {
+        self.inner.store(Arc::new(data));
+    }
+
+    /// Baca sekali lalu simpan. Dipakai thread refresh dan CLI.
+    pub fn refresh(&self) -> SlowData {
+        let mut degraded = Vec::new();
+        let (services, svc_deg) = sys::services::collect();
+        degraded.extend(svc_deg);
+        let (startup, start_deg) = sys::startup::collect();
+        degraded.extend(start_deg);
+        let data = SlowData {
+            services,
+            startup,
+            degraded,
+        };
+        self.store(data.clone());
+        data
+    }
+}
+
+/// Jalankan refresh lambat di thread sendiri, selamanya. `on_refresh` dipanggil
+/// setelah setiap pembaruan (UI memakainya untuk memicu repaint). Mengembalikan
+/// handle thread; proses berhenti saat UI keluar.
+pub fn spawn_slow_refresher(
+    store: Arc<SlowStore>,
+    on_refresh: Option<Box<dyn Fn() + Send>>,
+) -> std::thread::JoinHandle<()> {
+    std::thread::Builder::new()
+        .name("slow-refresh".into())
+        .spawn(move || {
+            loop {
+                store.refresh();
+                if let Some(cb) = &on_refresh {
+                    cb();
+                }
+                std::thread::sleep(SLOW_REFRESH);
+            }
+        })
+        .expect("gagal membuat thread slow-refresh")
+}
 
 pub struct Collector {
     host: HostInfo,
@@ -12,6 +92,11 @@ pub struct Collector {
     disks: sys::disk::DiskCollector,
     net: sys::net::NetCollector,
     gpu: sys::gpu::GpuCollector,
+    /// Kalau `None`, service/startup dibaca inline (CLI). Kalau `Some`, data
+    /// diambil dari thread refresh (UI) sehingga sampler tetap cepat.
+    slow: Option<Arc<SlowStore>>,
+    inline_slow: SlowData,
+    last_slow: Option<Instant>,
     last: Option<Instant>,
     seq: u64,
 }
@@ -43,9 +128,29 @@ impl Collector {
             disks: sys::disk::DiskCollector::new(),
             net: sys::net::NetCollector::new(),
             gpu: sys::gpu::GpuCollector::new(),
+            slow: None,
+            inline_slow: SlowData::default(),
+            last_slow: None,
             last: None,
             seq: 0,
         }
+    }
+
+    /// Pakai data lambat dari thread refresh. Setelah ini, `sample()` tidak
+    /// pernah membaca SCM/registry sendiri.
+    pub fn with_slow_store(mut self, store: Arc<SlowStore>) -> Self {
+        self.slow = Some(store);
+        self
+    }
+
+    /// Nyalakan verifikasi tanda tangan untuk kolom yang membutuhkannya.
+    pub fn set_signature_budget(&mut self, n: usize) {
+        self.procs.set_signature_budget(n);
+    }
+
+    /// Paksa pembacaan ulang service & startup pada sampel berikutnya.
+    pub fn invalidate_slow(&mut self) {
+        self.last_slow = None;
     }
 
     /// Bangun satu snapshot. Panggilan pertama menghasilkan CPU% nol karena
@@ -89,6 +194,30 @@ impl Collector {
         let mut host = self.host.clone();
         host.uptime_secs = sys::host::uptime_secs();
 
+        // Service, startup, dan sesi: dari thread refresh kalau ada, kalau tidak
+        // dibaca inline (CLI, dengan cadence 15 detik).
+        let slow = match &self.slow {
+            Some(store) => store.load().as_ref().clone(),
+            None => {
+                let due = self
+                    .last_slow
+                    .map(|t| t.elapsed() >= SLOW_REFRESH)
+                    .unwrap_or(true);
+                if due {
+                    self.last_slow = Some(now);
+                    self.inline_slow = SlowData {
+                        services: sys::services::collect().0,
+                        startup: sys::startup::collect().0,
+                        degraded: Vec::new(),
+                    };
+                }
+                self.inline_slow.clone()
+            }
+        };
+        degraded.extend(slow.degraded.clone());
+
+        let sessions = build_sessions(&processes);
+
         Snapshot {
             schema: crate::SCHEMA_VERSION,
             seq: self.seq,
@@ -102,9 +231,54 @@ impl Collector {
             net,
             gpus,
             processes,
+            services: slow.services,
+            startup: slow.startup,
+            sessions,
             degraded,
         }
     }
+}
+
+/// Agregasi proses per sesi Terminal Services.
+///
+/// Nama pengguna diambil dari proses dengan user yang terbaca; sesi 0 hampir
+/// selalu milik sistem dan tidak punya user.
+fn build_sessions(processes: &[crate::model::ProcessRow]) -> Vec<SessionRow> {
+    use std::collections::BTreeMap;
+
+    let mut by_session: BTreeMap<u32, SessionRow> = BTreeMap::new();
+    for row in processes {
+        let entry = by_session
+            .entry(row.session_id)
+            .or_insert_with(|| SessionRow {
+                session_id: row.session_id,
+                state: String::new(),
+                ..Default::default()
+            });
+        entry.process_count += 1;
+        entry.cpu_percent += row.cpu_percent;
+        entry.mem_private_bytes = entry
+            .mem_private_bytes
+            .saturating_add(row.mem_private_bytes);
+        if entry.user.is_none() {
+            if let Some(user) = &row.user {
+                entry.user = Some(user.clone());
+            }
+        }
+    }
+
+    by_session
+        .into_values()
+        .map(|mut s| {
+            s.cpu_percent = s.cpu_percent.clamp(0.0, 100.0);
+            s.state = if s.session_id == 0 {
+                "Layanan".to_string()
+            } else {
+                "Aktif".to_string()
+            };
+            s
+        })
+        .collect()
 }
 
 #[cfg(test)]

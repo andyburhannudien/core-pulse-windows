@@ -220,9 +220,9 @@ Status implementasi per bagian spesifikasi ini:
 | §3 tab Proses (kolom, sort, search, virtualized) | **Selesai** untuk Nama/PID/CPU/Memori/GPU/Thread/Handle |
 | §4 tab Kinerja (CPU, memori, disk, GPU, jaringan, grafik) | **Selesai** |
 | §5 tab Sensor | Belum (P3) |
-| §6 tab lain | Belum (P2) |
-| §7 menu kontekstual | Belum (P2) |
-| §8 keyboard | Belum (P2) |
+| §6 tab lain (Layanan, Mulai, Pengguna) | **Selesai** |
+| §7 menu kontekstual | **Selesai** (affinity & properti file belum) |
+| §8 keyboard | Belum (P5) |
 | §9 tema | Sebagian — tema gelap tetap; token belum dipusatkan |
 | §10 aksesibilitas | Belum diuji |
 | §11 tray | Belum (P4) |

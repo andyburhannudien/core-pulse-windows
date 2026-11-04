@@ -230,10 +230,24 @@ pub enum ProcessStatus { Running, Suspended, NotResponding, Zombie }
 pub enum Integrity { Untrusted, Low, Medium, High, System, Protected }
 ```
 
+Tiga field tambahan di `ProcessRow` (P1/P2):
+
+| Field | Default | Arti |
+|---|---|---|
+| `details_complete` | `false` | `false` = detail statis belum dibaca (`…` di UI); `true` + `None` = benar-benar tidak tersedia (`—`) |
+| `session_id` | 0 | ID sesi Terminal Services; 0 = sesi layanan |
+| `size_is_estimate` (di `DiskData`) | `false` | `true` = ukuran dihitung dari volume, bukan kapasitas fisik |
+
 `start_time_unix_ms` bukan field hiasan. Kombinasi `(pid, start_time)` adalah
 identitas proses yang stabil; PID saja bisa dipakai ulang oleh proses lain.
 Semua aksi destruktif (end task, suspend) **wajib** memverifikasi pasangan ini
-sebelum bertindak. Lihat [THREAT-MODEL.md](THREAT-MODEL.md).
+sebelum bertindak. Lihat [THREAT-MODEL.md](THREAT-MODEL.md) dan
+[P2-RESULTS.md](P2-RESULTS.md).
+
+`details_complete` ada karena `cmdline: null` punya dua arti yang sangat berbeda:
+proses terproteksi menolak dibaca, atau kita belum mencoba. Menggabungkannya
+menjadi satu arti akan menampilkan "—" (tidak tersedia) padahal hanya "belum
+dibaca" — pelanggaran ADR-0008 di tingkat field.
 
 ### `Degradation`
 

@@ -32,8 +32,12 @@ jalan dan **mengatakan terus terang** sensor mana yang tidak tersedia.
 
 ![Tab Kinerja](docs/images/performance.png)
 
-*Build P1 pada i5-9500T / 8 GB / Windows 11 build 26100. Kolom Jaringan, Disk,
-dan Sensor per proses menyusul di P2–P3.*
+![Tab Layanan](docs/images/services.png)
+
+![Panel detail proses](docs/images/detail.png)
+
+*Build P2 pada i5-9500T / 8 GB / Windows 11 build 26100. Tab Sensor dan helper
+elevated menyusul di P3–P4.*
 
 ## Status
 
@@ -41,13 +45,16 @@ dan Sensor per proses menyusul di P2–P3.*
 |---|---|
 | Dokumentasi arsitektur & ADR | **Selesai** |
 | Workspace Cargo (6 crate) | **Selesai** — P0 |
-| Collector CPU / memori / proses | **Berfungsi** — 58 test lulus |
+| Collector CPU / memori / proses | **Berfungsi** |
 | Collector disk / jaringan / GPU | **Berfungsi** — diverifikasi silang, rasio I/O 1,00× |
+| Aksi proses (end task, tree, suspend, prioritas, EcoQoS) | **Berfungsi** — guard PID-reuse teruji |
+| Detail proses (cmdline, user, integritas, tanda tangan) | **Berfungsi** |
+| Tab Layanan / Mulai / Pengguna | **Berfungsi** — 714 layanan, 7 entri startup, 2 sesi |
 | UI (tabel proses, tab kinerja) | **Berfungsi** — tabel virtualized, 4 sparkline 60 s |
-| CLI (`top`, `doctor`, `bench`, `compare`, `verify`, `record`) | **Berfungsi** |
+| CLI (`top`, `doctor`, `bench`, `compare`, `verify`, `action-selftest`, `services`, `startup`, `users`, `record`) | **Berfungsi** |
 | Gate G0 (akurasi CPU + budget performa) | **LULUS** — [P0-RESULTS.md](docs/P0-RESULTS.md) |
 | Gate G1 (disk/net/GPU + I/O nyata) | **LULUS** — [P1-RESULTS.md](docs/P1-RESULTS.md) |
-| Aksi proses (end task, prioritas) | Belum ada — P2 |
+| Gate G2 (aksi proses + PID reuse) | **LULUS** — [P2-RESULTS.md](docs/P2-RESULTS.md) |
 | Sensor framework + SMART | Belum ada — P3 |
 | Helper elevated | Belum ada — P4 |
 | Installer | Belum ada — P5 |
@@ -59,11 +66,12 @@ Angka terukur pada mesin pengembangan (i5-9500T, 8 GB, build 26100):
 | Selisih CPU% vs `GetSystemTimes` | 0,49% rata-rata (maks 0,89%) |
 | Selisih disk/GPU/jaringan vs PDH independen | 0,00% |
 | Verifikasi I/O nyata (134 MB ditulis) | rasio **1,00×** |
+| Guard PID reuse | 6/6 skenario lulus |
 | Enumerasi 250 proses | p95 21 ms |
-| Build snapshot lengkap | p95 47,6 ms |
-| CPU aplikasi idle | 0,64% dari sistem |
-| Private bytes UI | 38,4 MB |
-| Ukuran biner UI | 5,86 MB |
+| Build snapshot lengkap | p95 45 ms |
+| CPU aplikasi idle | 0,63% dari sistem |
+| Private bytes UI | 38,7 MB |
+| Ukuran biner UI | 6,22 MB |
 
 Dokumentasi ditulis lebih dulu dengan sengaja: keputusan tersulit di proyek ini
 bukan "cara menampilkan tabel", tapi **dari mana angka suhu CPU datang**, dan itu
@@ -91,6 +99,7 @@ Detail setup ada di [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md).
 | [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md) | Matriks hardware/driver dan batas yang diketahui |
 | [docs/P0-RESULTS.md](docs/P0-RESULTS.md) | Hasil P0: bukti Gate G0, angka terukur, temuan |
 | [docs/P1-RESULTS.md](docs/P1-RESULTS.md) | Hasil P1: bukti Gate G1, verifikasi I/O nyata, temuan |
+| [docs/P2-RESULTS.md](docs/P2-RESULTS.md) | Hasil P2: bukti Gate G2, guard PID reuse, temuan |
 | [docs/ENVIRONMENT-AUDIT.md](docs/ENVIRONMENT-AUDIT.md) | Hasil audit mesin pengembangan (fakta, bukan asumsi) |
 | [docs/ROADMAP.md](docs/ROADMAP.md) | Fase P0–P5, gate yang harus lulus |
 | [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) | Setup toolchain, perintah build, troubleshooting |

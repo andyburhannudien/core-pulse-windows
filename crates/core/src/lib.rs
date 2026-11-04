@@ -10,7 +10,7 @@ pub mod model;
 pub mod sampler;
 pub mod sys;
 
-pub use collector::Collector;
+pub use collector::{Collector, SlowData, SlowStore, spawn_slow_refresher};
 pub use model::*;
 
 /// Versi skema model data. Lihat docs/DATA-MODEL.md.

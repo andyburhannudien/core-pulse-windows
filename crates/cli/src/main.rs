@@ -51,6 +51,17 @@ enum Command {
         #[arg(long, default_value_t = 32)]
         io_size_mb: u64,
     },
+    /// Uji guard PID-reuse dan aksi proses (Gate G2).
+    ActionSelftest,
+    /// Daftar layanan Windows.
+    Services {
+        #[arg(long, default_value_t = 20)]
+        limit: usize,
+    },
+    /// Daftar entri startup.
+    Startup,
+    /// Daftar sesi pengguna.
+    Users,
     /// Rekam N snapshot ke file untuk fixture test.
     Record {
         #[arg(long, default_value = "fixture.json")]
@@ -81,6 +92,10 @@ fn main() -> anyhow::Result<()> {
             seconds,
             io_size_mb,
         } => verify(seconds, io_size_mb),
+        Command::ActionSelftest => action_selftest(),
+        Command::Services { limit } => list_services(limit),
+        Command::Startup => list_startup(),
+        Command::Users => list_users(),
         Command::Record { out, samples } => record(&out, samples),
     }
 }
@@ -356,6 +371,258 @@ fn doctor() -> anyhow::Result<()> {
                     .unwrap_or_else(|| "—".into()),
             );
         }
+    }
+    Ok(())
+}
+
+/// Uji guard PID-reuse secara nyata, bukan hanya lewat unit test.
+///
+/// Empat skenario, semuanya harus sesuai harapan:
+/// 1. aksi dengan identitas benar → berhasil
+/// 2. aksi dengan identitas basi (PID sama, waktu beda) → ditolak, proses hidup
+/// 3. aksi pada PID yang sudah mati → ditolak
+/// 4. aksi pada proses kritikal (PID 4) → ditolak
+fn action_selftest() -> anyhow::Result<()> {
+    use core_pulse_core::sys::action::{self, ActionError};
+    use core_pulse_core::sys::proc::ProcCollector;
+    use std::process::{Command, Stdio};
+
+    let mut failures = 0u32;
+
+    fn check(label: &str, ok: bool, detail: &str) -> bool {
+        println!(
+            "  [{}] {label}{}",
+            if ok { "LULUS" } else { "GAGAL" },
+            if detail.is_empty() {
+                String::new()
+            } else {
+                format!(" — {detail}")
+            }
+        );
+        ok
+    }
+
+    fn spawn_and_locate() -> (u32, u64) {
+        let child = Command::new("cmd.exe")
+            .args(["/c", "ping", "-n", "60", "127.0.0.1"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("gagal spawn proses uji");
+        let pid = child.id();
+        std::mem::forget(child);
+        std::thread::sleep(Duration::from_millis(400));
+
+        let mut c = ProcCollector::new();
+        let _ = c.collect(1.0);
+        let (rows, _) = c.collect(1.0);
+        let row = rows
+            .iter()
+            .find(|r| r.pid == pid)
+            .expect("proses uji hilang");
+        (pid, row.start_time_unix_ms)
+    }
+
+    println!("core-pulse action-selftest");
+    println!("(setiap skenario memakai proses uji yang benar-benar berjalan)\n");
+
+    // --- 1. Identitas benar: aksi harus berhasil ---
+    let (pid, start) = spawn_and_locate();
+    let key = core_pulse_core::model::ProcessKey {
+        pid,
+        start_time_unix_ms: start,
+    };
+    let ok = match action::terminate(&key, "cmd.exe") {
+        Ok(outcome) => check(
+            "identitas benar → terminate berhasil",
+            outcome.affected == 1,
+            "",
+        ),
+        Err(e) => check(
+            "identitas benar → terminate berhasil",
+            false,
+            &e.to_string(),
+        ),
+    };
+    if !ok {
+        failures += 1;
+    }
+
+    // --- 2. Identitas basi: harus ditolak dan proses tetap hidup ---
+    let (pid, start) = spawn_and_locate();
+    let stale = core_pulse_core::model::ProcessKey {
+        pid,
+        start_time_unix_ms: start.wrapping_sub(5_000),
+    };
+    match action::terminate(&stale, "cmd.exe") {
+        Err(ActionError::IdentityChanged {
+            expected_ms,
+            actual_ms,
+        }) => {
+            if !check(
+                "identitas basi → ditolak",
+                true,
+                &format!("PID {pid}, diharapkan {expected_ms} ms, aktual {actual_ms} ms"),
+            ) {
+                failures += 1;
+            }
+        }
+        Ok(_) => {
+            check(
+                "identitas basi → ditolak",
+                false,
+                "proses terlanjur dimatikan",
+            );
+            failures += 1;
+        }
+        Err(e) => {
+            check(
+                "identitas basi → ditolak",
+                false,
+                &format!("error salah: {e}"),
+            );
+            failures += 1;
+        }
+    }
+    // Pastikan proses memang masih hidup.
+    let mut c = ProcCollector::new();
+    let _ = c.collect(1.0);
+    let (rows, _) = c.collect(1.0);
+    let alive = rows.iter().any(|r| r.pid == pid);
+    if !check("setelah ditolak, proses tetap hidup", alive, "") {
+        failures += 1;
+    }
+    let _ = Command::new("taskkill")
+        .args(["/F", "/PID", &pid.to_string()])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+
+    // --- 3. PID yang sudah mati ---
+    let dead = core_pulse_core::model::ProcessKey {
+        pid: 0xFFFF_FF00,
+        start_time_unix_ms: 1,
+    };
+    let ok = matches!(
+        action::terminate(&dead, "ghost.exe"),
+        Err(ActionError::ProcessGone) | Err(ActionError::AccessDenied)
+    );
+    if !check("PID tidak ada → ditolak", ok, "") {
+        failures += 1;
+    }
+
+    // --- 4. Proses kritikal ---
+    let system = core_pulse_core::model::ProcessKey {
+        pid: 4,
+        start_time_unix_ms: 0,
+    };
+    let ok = matches!(
+        action::terminate(&system, "System"),
+        Err(ActionError::CriticalProcess)
+    );
+    if !check("proses kritikal (PID 4) → ditolak", ok, "") {
+        failures += 1;
+    }
+
+    // --- 5. Aksi non-destruktif pada proses sendiri tidak boleh crash ---
+    let me = core_pulse_core::model::ProcessKey {
+        pid: std::process::id(),
+        start_time_unix_ms: 0,
+    };
+    // Waktu pembuatan sengaja salah, jadi harus ditolak dengan IdentityChanged.
+    let ok = matches!(
+        action::set_priority(&me, "core-pulse-cli.exe", action::Priority::Normal),
+        Err(ActionError::IdentityChanged { .. })
+    );
+    if !check("identitas salah pada aksi non-destruktif → ditolak", ok, "") {
+        failures += 1;
+    }
+
+    println!();
+    if failures == 0 {
+        println!("G2: LULUS (semua skenario sesuai harapan)");
+        Ok(())
+    } else {
+        println!("G2: {failures} skenario GAGAL");
+        anyhow::bail!("action selftest gagal")
+    }
+}
+
+fn list_services(limit: usize) -> anyhow::Result<()> {
+    let (services, degraded) = core_pulse_core::sys::services::collect();
+    println!("{} layanan", services.len());
+    println!(
+        "{:<28} {:<46} {:<10} {:<8} {:>7}",
+        "NAMA", "TAMPILAN", "STATUS", "START", "PID"
+    );
+    for s in services.iter().take(limit) {
+        println!(
+            "{:<28} {:<46} {:<10} {:<8} {:>7}",
+            truncate(&s.name, 28),
+            truncate(&s.display_name, 46),
+            s.state.label(),
+            s.start_type.label(),
+            if s.pid == 0 {
+                "—".to_string()
+            } else {
+                s.pid.to_string()
+            }
+        );
+    }
+    for d in degraded {
+        println!("degradasi: {:?}/{:?}: {}", d.area, d.reason, d.detail);
+    }
+    Ok(())
+}
+
+fn list_startup() -> anyhow::Result<()> {
+    let (entries, degraded) = core_pulse_core::sys::startup::collect();
+    println!("{} entri startup", entries.len());
+    println!("{:<46} {:<16} {:<6} FILE", "NAMA", "SUMBER", "32BIT");
+    for e in &entries {
+        println!(
+            "{:<46} {:<16} {:<6} {}",
+            truncate(&e.name, 46),
+            e.source.label(),
+            if e.is_32bit { "ya" } else { "—" },
+            match e.target_exists {
+                Some(true) => "ada",
+                Some(false) => "hilang",
+                None => "—",
+            }
+        );
+    }
+    for d in degraded {
+        println!("degradasi: {:?}/{:?}: {}", d.area, d.reason, d.detail);
+    }
+    Ok(())
+}
+
+fn list_users() -> anyhow::Result<()> {
+    let mut collector = Collector::new();
+    // Detail proses (termasuk nama pengguna) diisi bertahap: 40 proses per
+    // sampel. Tiga sampel cukup untuk menemukan user tiap sesi.
+    for _ in 0..4 {
+        let _ = collector.sample();
+        std::thread::sleep(Duration::from_millis(600));
+    }
+    let snap = collector.sample();
+    println!("{} sesi", snap.sessions.len());
+    println!(
+        "{:>5} {:<30} {:<12} {:>8} {:>8} {:>10}",
+        "SESI", "PENGGUNA", "STATUS", "PROSES", "CPU", "MEMORI"
+    );
+    for s in &snap.sessions {
+        println!(
+            "{:>5} {:<30} {:<12} {:>8} {:>7.1}% {:>10}",
+            s.session_id,
+            s.user.clone().unwrap_or_else(|| "—".into()),
+            s.state,
+            s.process_count,
+            s.cpu_percent,
+            human_bytes(s.mem_private_bytes)
+        );
     }
     Ok(())
 }

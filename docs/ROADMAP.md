@@ -13,8 +13,8 @@ diaudit (lihat [ENVIRONMENT-AUDIT.md](ENVIRONMENT-AUDIT.md)).
 |---|---|---|---|
 | ~~P0~~ | ~~Toolchain + skeleton + spike angka~~ | ~~1–2 hari~~ | **G0 LULUS** — [P0-RESULTS.md](P0-RESULTS.md) |
 | ~~P1~~ | ~~Paritas Task Manager (proses + performance)~~ | ~~1–1,5 minggu~~ | **G1 LULUS** — [P1-RESULTS.md](P1-RESULTS.md) |
-| P2 | Aksi proses + tab Services/Startup/Users/Details | 1 minggu | G2: tidak ada aksi yang mengenai PID salah |
-| P3 | Sensor framework + SMART + GPU + dashboard | 1–1,5 minggu | G3: suhu 2 HDD muncul, status CPU jelas |
+| ~~P2~~ | ~~Aksi proses + tab Services/Startup/Users/Details~~ | ~~1 minggu~~ | **G2 LULUS** — [P2-RESULTS.md](P2-RESULTS.md) |
+| P3 | Sensor framework + SMART + GPU + dashboard | 1–1,5 minggu | G3: suhu disk muncul, status CPU jelas |
 | P4 | Helper elevated + alert + riwayat + tray | 1 minggu | G4: helper mati → UI tetap benar |
 | P5 | Installer, docs pengguna, CI lengkap | 3–5 hari | G5: install di mesin bersih tanpa admin |
 
@@ -85,23 +85,35 @@ Urutan kerja yang dijalankan:
 | Build snapshot p95 | < 100 ms | 47,6 ms | LULUS |
 | Test | semua lulus | 58 test | LULUS |
 
-## P2 — Aksi dan tab lain (1 minggu)
+## P2 — Aksi dan tab lain (1 minggu) — **SELESAI**
 
-- End task (single + tree), dengan konfirmasi untuk proses sistem.
-- Suspend / resume (`NtSuspendProcess` / `NtResumeProcess`).
-- Priority class, affinity mask, Efficiency Mode (`SetProcessInformation` +
-  `PROCESS_POWER_THROTTLING_EXECUTION_SPEED`).
-- Buka lokasi file, copy command line, copy PID.
-- Tab Services (SCM: status, start type, start/stop), Startup (Registry Run +
-  Task Scheduler), Users (sesi + proses per sesi), Details (kolom teknis).
+Hasil lengkap, bukti, dan 9 keputusan teknis ada di
+[P2-RESULTS.md](P2-RESULTS.md). Ringkas: Gate G2 lulus dengan guard PID-reuse
+yang diuji memakai proses nyata (bukan mock), dan snapshot tetap 45 ms setelah
+service 714 entri dipindah ke thread terpisah.
 
-**Gate G2:**
+Yang dibangun:
 
-- Setiap aksi memverifikasi `(pid, start_time)` sebelum bertindak; test otomatis
-  mensimulasikan PID reuse dan memastikan aksi ditolak.
-- Aksi pada proses yang butuh elevasi menghasilkan pesan jelas, bukan gagal senyap.
-- Tidak ada aksi yang bisa dijalankan tanpa konfirmasi pada proses kritikal
-  (`System`, `csrss.exe`, `wininit.exe`, `services.exe`, PID 0/4).
+- End task (single + tree), suspend/resume (`NtSuspendProcess`/`NtResumeProcess`).
+- Priority class, Efficiency Mode (`SetProcessInformation` +
+  `PROCESS_POWER_THROTTLING_EXECUTION_SPEED`), buka lokasi file, salin
+  nama/PID/path/command line.
+- Tab Layanan (714 entri), Mulai (registry Run + folder Startup, dengan
+  pemeriksaan keberadaan file), Pengguna (sesi + agregat), panel detail proses.
+- `details_complete` membedakan "belum dibaca" (`…`) dari "tidak tersedia" (`—`).
+
+**Gate G2 — hasil terukur:**
+
+| Kriteria | Hasil | Status |
+|---|---|---|
+| Aksi identitas benar | terminate berhasil | LULUS |
+| Aksi identitas basi (PID reuse) | ditolak, proses tetap hidup | LULUS |
+| PID mati / proses kritikal | ditolak | LULUS |
+| Snapshot p95 | 45,0 ms | LULUS |
+| Test | 86 lulus | LULUS |
+
+Belum ada (disengaja): start/stop layanan (butuh admin, P4), hapus entri startup,
+affinity CPU.
 
 ## P3 — Sensor (1–1,5 minggu)
 

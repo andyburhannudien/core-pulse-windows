@@ -7,6 +7,82 @@ use std::sync::Arc;
 pub enum Tab {
     Processes,
     Performance,
+    Services,
+    Startup,
+    Users,
+}
+
+impl Tab {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Processes => "Proses",
+            Self::Performance => "Kinerja",
+            Self::Services => "Layanan",
+            Self::Startup => "Mulai",
+            Self::Users => "Pengguna",
+        }
+    }
+
+    pub fn all() -> [Self; 5] {
+        [
+            Self::Processes,
+            Self::Performance,
+            Self::Services,
+            Self::Startup,
+            Self::Users,
+        ]
+    }
+}
+
+/// Aksi yang menunggu konfirmasi pengguna.
+#[derive(Debug, Clone)]
+pub struct PendingAction {
+    pub kind: PendingKind,
+    pub pid: u32,
+    pub name: String,
+    pub start_time_unix_ms: u64,
+    /// Jumlah proses turunan, untuk aksi yang mengenai pohon proses.
+    pub descendants: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PendingKind {
+    Terminate,
+    TerminateTree,
+    Suspend,
+    Resume,
+    SetPriority(core_pulse_core::sys::action::Priority),
+    SetEfficiency(bool),
+}
+
+impl PendingKind {
+    pub fn title(self) -> &'static str {
+        match self {
+            Self::Terminate => "Akhiri tugas?",
+            Self::TerminateTree => "Akhiri pohon proses?",
+            Self::Suspend => "Tangguhkan proses?",
+            Self::Resume => "Lanjutkan proses?",
+            Self::SetPriority(_) => "Ubah prioritas?",
+            Self::SetEfficiency(true) => "Aktifkan mode efisiensi?",
+            Self::SetEfficiency(false) => "Matikan mode efisiensi?",
+        }
+    }
+
+    /// Aksi destruktif butuh konfirmasi eksplisit dan tombol merah.
+    pub fn is_destructive(self) -> bool {
+        matches!(
+            self,
+            Self::Terminate | Self::TerminateTree | Self::SetPriority(_)
+        )
+    }
+}
+
+/// Pesan hasil aksi terakhir, ditampilkan di status bar selama beberapa detik.
+#[derive(Debug, Clone)]
+pub struct ActionFeedback {
+    pub text: String,
+    pub is_error: bool,
+    pub shown_at: std::time::Instant,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -66,6 +142,13 @@ pub struct AppState {
     pub history: History,
     pub last_seq: u64,
     pub selected: Option<u32>,
+    /// Detail proses yang sedang dibuka di panel bawah.
+    pub detail_pid: Option<u32>,
+    /// Aksi yang menunggu konfirmasi.
+    pub pending: Option<PendingAction>,
+    pub feedback: Option<ActionFeedback>,
+    /// Nyalakan verifikasi tanda tangan (mahal) hanya saat kolomnya terlihat.
+    pub show_signatures: bool,
     /// Snapshot yang sedang ditampilkan (immutable, dari ArcSwap).
     pub snapshot: Arc<Snapshot>,
 }
@@ -81,6 +164,10 @@ impl Default for AppState {
             history: History::default(),
             last_seq: 0,
             selected: None,
+            detail_pid: None,
+            pending: None,
+            feedback: None,
+            show_signatures: false,
             snapshot: Arc::new(Snapshot::empty()),
         }
     }
@@ -149,6 +236,50 @@ impl AppState {
             self.sort = key;
             // Kolom numerik mulai dari terbesar; kolom teks mulai dari A.
             self.sort_asc = !key.is_numeric();
+        }
+    }
+
+    /// Baris untuk panel detail.
+    pub fn detail_row(&self) -> Option<&ProcessRow> {
+        let pid = self.detail_pid?;
+        self.snapshot.processes.iter().find(|p| p.pid == pid)
+    }
+
+    /// Jumlah turunan langsung dan tidak langsung dari sebuah PID.
+    pub fn descendant_count(&self, pid: u32) -> u32 {
+        let mut count = 0;
+        let mut frontier = vec![pid];
+        for _ in 0..64 {
+            if frontier.is_empty() {
+                break;
+            }
+            let mut next = Vec::new();
+            for row in &self.snapshot.processes {
+                if frontier.contains(&row.parent_pid) && row.pid != pid {
+                    count += 1;
+                    next.push(row.pid);
+                }
+            }
+            frontier = next;
+        }
+        count
+    }
+
+    /// Tampilkan pesan hasil aksi; hilang otomatis setelah 6 detik.
+    pub fn set_feedback(&mut self, text: impl Into<String>, is_error: bool) {
+        self.feedback = Some(ActionFeedback {
+            text: text.into(),
+            is_error,
+            shown_at: std::time::Instant::now(),
+        });
+    }
+
+    /// Buang feedback yang sudah kedaluwarsa.
+    pub fn expire_feedback(&mut self) {
+        if let Some(f) = &self.feedback {
+            if f.shown_at.elapsed() > std::time::Duration::from_secs(6) {
+                self.feedback = None;
+            }
         }
     }
 }

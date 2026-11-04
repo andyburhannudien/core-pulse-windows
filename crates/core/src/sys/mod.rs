@@ -1,6 +1,8 @@
 //! Akses langsung ke API Windows. Satu-satunya tempat `unsafe` di crate ini.
 
+pub mod action;
 pub mod cpu;
+pub mod details;
 pub mod disk;
 pub mod gpu;
 pub mod host;
@@ -8,6 +10,8 @@ pub mod mem;
 pub mod net;
 pub mod pdh;
 pub mod proc;
+pub mod services;
+pub mod startup;
 
 /// Query `NtQuerySystemInformation` untuk kelas informasi yang mengembalikan
 /// buffer variabel. Buffer tumbuh sampai muat.

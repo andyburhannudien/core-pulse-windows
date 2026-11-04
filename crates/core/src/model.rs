@@ -23,6 +23,14 @@ pub struct Snapshot {
     pub net: Vec<NetData>,
     pub gpus: Vec<GpuData>,
     pub processes: Vec<ProcessRow>,
+    /// Service, startup, dan sesi diperbarui jauh lebih jarang daripada angka
+    /// CPU (lihat `Collector::sample`), jadi bisa kosong di snapshot awal.
+    #[serde(default)]
+    pub services: Vec<ServiceRow>,
+    #[serde(default)]
+    pub startup: Vec<StartupEntry>,
+    #[serde(default)]
+    pub sessions: Vec<SessionRow>,
     pub degraded: Vec<Degradation>,
 }
 
@@ -42,6 +50,9 @@ impl Snapshot {
             net: Vec::new(),
             gpus: Vec::new(),
             processes: Vec::new(),
+            services: Vec::new(),
+            startup: Vec::new(),
+            sessions: Vec::new(),
             degraded: Vec::new(),
         }
     }
@@ -233,6 +244,8 @@ pub struct ProcessKey {
 pub struct ProcessRow {
     pub pid: u32,
     pub parent_pid: u32,
+    /// ID sesi Terminal Services. 0 = sesi layanan.
+    pub session_id: u32,
     pub name: String,
     pub exe_path: Option<PathBuf>,
     pub cmdline: Option<String>,
@@ -251,6 +264,12 @@ pub struct ProcessRow {
     pub net_bps: Option<u64>,
     pub gpu_percent: Option<f32>,
 
+    /// `true` = detail statis (cmdline, user, integrity) sudah dibaca untuk
+    /// proses ini. `false` = belum dibaca; UI harus menampilkan "…", bukan "—".
+    /// Membedakan keduanya penting: `None` berarti "tidak tersedia", sedangkan
+    /// `false` berarti "belum dicoba" (ADR-0008).
+    #[serde(default)]
+    pub details_complete: bool,
     pub threads: u32,
     pub handles: u32,
     pub status: ProcessStatus,
@@ -281,6 +300,8 @@ pub enum Area {
     Sensors,
     Processes,
     Host,
+    Services,
+    Startup,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -298,6 +319,151 @@ pub struct Degradation {
     pub area: Area,
     pub reason: DegradeReason,
     pub detail: String,
+}
+
+// ---------------------------------------------------------------------------
+// Services, startup, sessions
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ServiceRunState {
+    Stopped,
+    StartPending,
+    StopPending,
+    Running,
+    ContinuePending,
+    PausePending,
+    Paused,
+    #[default]
+    Unknown,
+}
+
+impl ServiceRunState {
+    /// Nilai `SERVICE_STATUS.dwCurrentState`.
+    pub fn from_raw(raw: u32) -> Self {
+        match raw {
+            1 => Self::Stopped,
+            2 => Self::StartPending,
+            3 => Self::StopPending,
+            4 => Self::Running,
+            5 => Self::ContinuePending,
+            6 => Self::PausePending,
+            7 => Self::Paused,
+            _ => Self::Unknown,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Stopped => "Berhenti",
+            Self::StartPending => "Mulai…",
+            Self::StopPending => "Berhenti…",
+            Self::Running => "Berjalan",
+            Self::ContinuePending => "Lanjut…",
+            Self::PausePending => "Jeda…",
+            Self::Paused => "Dijeda",
+            Self::Unknown => "—",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ServiceStartType {
+    Boot,
+    System,
+    Auto,
+    /// Start otomatis tapi tertunda — dampak boot lebih kecil.
+    AutoDelayed,
+    Manual,
+    Disabled,
+    #[default]
+    Unknown,
+}
+
+impl ServiceStartType {
+    /// Nilai `SERVICE_STATUS.dwStartType`. Nilai 2 (auto) tidak membedakan
+    /// delayed auto start; perbedaan itu hanya ada di konfigurasi, bukan status.
+    pub fn from_raw(raw: u32) -> Self {
+        match raw {
+            0 => Self::Boot,
+            1 => Self::System,
+            2 => Self::Auto,
+            3 => Self::Manual,
+            4 => Self::Disabled,
+            _ => Self::Unknown,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Boot => "Boot",
+            Self::System => "System",
+            Self::Auto => "Otomatis",
+            Self::AutoDelayed => "Otomatis (tertunda)",
+            Self::Manual => "Manual",
+            Self::Disabled => "Nonaktif",
+            Self::Unknown => "—",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ServiceRow {
+    pub name: String,
+    pub display_name: String,
+    pub state: ServiceRunState,
+    pub start_type: ServiceStartType,
+    /// PID proses host, 0 kalau service tidak berjalan.
+    pub pid: u32,
+    pub accepts_stop: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum StartupSource {
+    /// `HKLM\...\Run`
+    #[default]
+    RegistryMachine,
+    /// `HKCU\...\Run`
+    RegistryUser,
+    /// Folder Startup di ProgramData atau per pengguna.
+    StartupFolder,
+    /// Scheduled task dengan trigger saat logon/boot.
+    ScheduledTask,
+}
+
+impl StartupSource {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::RegistryMachine => "HKLM\\Run",
+            Self::RegistryUser => "HKCU\\Run",
+            Self::StartupFolder => "Folder Startup",
+            Self::ScheduledTask => "Task Scheduler",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct StartupEntry {
+    pub name: String,
+    pub command: String,
+    pub source: StartupSource,
+    /// `true` kalau entri ada di subtree Wow6432Node (aplikasi 32-bit).
+    pub is_32bit: bool,
+    /// File yang dirujuk ada di disk. `None` kalau path tidak bisa diurai.
+    pub target_exists: Option<bool>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct SessionRow {
+    pub session_id: u32,
+    pub user: Option<String>,
+    pub state: String,
+    pub process_count: u32,
+    pub cpu_percent: f32,
+    pub mem_private_bytes: u64,
 }
 
 // ---------------------------------------------------------------------------

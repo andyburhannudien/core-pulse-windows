@@ -9,6 +9,8 @@ use std::time::{Duration, Instant};
 pub struct SnapshotStore {
     inner: arc_swap::ArcSwap<Snapshot>,
     seq: AtomicU64,
+    /// Diminta oleh UI: apakah verifikasi tanda tangan perlu dijalankan.
+    signatures_wanted: std::sync::atomic::AtomicBool,
 }
 
 impl Default for SnapshotStore {
@@ -22,7 +24,20 @@ impl SnapshotStore {
         Self {
             inner: arc_swap::ArcSwap::from_pointee(Snapshot::empty()),
             seq: AtomicU64::new(0),
+            signatures_wanted: std::sync::atomic::AtomicBool::new(false),
         }
+    }
+
+    /// UI menyalakan ini saat kolom tanda tangan terlihat. Sampler membacanya
+    /// setiap tick; verifikasi 5–20 ms per file tidak boleh jalan tanpa alasan.
+    pub fn set_signatures_wanted(&self, wanted: bool) {
+        self.signatures_wanted
+            .store(wanted, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    pub fn signatures_wanted(&self) -> bool {
+        self.signatures_wanted
+            .load(std::sync::atomic::Ordering::Relaxed)
     }
 
     pub fn load(&self) -> arc_swap::Guard<Arc<Snapshot>> {
