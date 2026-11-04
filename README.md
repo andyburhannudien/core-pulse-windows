@@ -72,9 +72,9 @@ Measured on the development machine (i5-9500T, 8 GB, build 26100):
 | PID-reuse guard | 6/6 scenarios passed |
 | Enumerating 250 processes | p95 21 ms |
 | Full snapshot build | p95 45 ms |
-| Application CPU while idle | 0.63% of system |
-| UI private bytes | 38.7 MB |
-| UI binary size | 6.22 MB |
+| Application CPU while idle | **0.40% of system** (release, maximised, P4) |
+| UI private bytes | **44.0 MB** (release, P4) |
+| UI binary size | **8.02 MB** (release, P4) |
 
 Documentation was written first on purpose: the hardest decision in this
 project is not "how to render a table" but **where CPU temperature comes from**,
