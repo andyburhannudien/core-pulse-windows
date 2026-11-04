@@ -4,7 +4,11 @@ param(
     [int]$DelayMs = 1400,
     [switch]$ClientArea,
     [int]$MoveX = -1,
-    [int]$MoveY = -1
+    [int]$MoveY = -1,
+    # Force the legacy BitBlt path (captures actual screen pixels, so anything
+    # covering the window is included). Default uses PrintWindow so occluding
+    # windows do not matter.
+    [switch]$ScreenCopy
 )
 
 Add-Type -AssemblyName System.Drawing
@@ -28,6 +32,8 @@ public static class WinShot {
     public static extern bool IsIconic(IntPtr hWnd);
     [DllImport("user32.dll")]
     public static extern bool SetWindowPos(IntPtr hWnd, IntPtr after, int x, int y, int cx, int cy, uint flags);
+    [DllImport("user32.dll")]
+    public static extern bool PrintWindow(IntPtr hWnd, IntPtr hdc, uint flags);
 
     [StructLayout(LayoutKind.Sequential)]
     public struct RECT { public int Left, Top, Right, Bottom; }
@@ -90,7 +96,25 @@ if ($width -le 0 -or $height -le 0) {
 
 $bmp = New-Object System.Drawing.Bitmap $width, $height
 $gfx = [System.Drawing.Graphics]::FromImage($bmp)
-$gfx.CopyFromScreen($x, $y, 0, 0, $bmp.Size)
+
+if ($ScreenCopy) {
+    $gfx.CopyFromScreen($x, $y, 0, 0, $bmp.Size)
+} else {
+    # PrintWindow with PW_RENDERFULLCONTENT (2) asks the window to paint itself
+    # into our HDC, so occluding windows are irrelevant. If it reports failure
+    # (some GL surfaces refuse), fall back to a screen copy.
+    $hdc = $gfx.GetHdc()
+    $ok = $false
+    try {
+        $ok = [WinShot]::PrintWindow($hwnd, $hdc, 2)
+    } finally {
+        $gfx.ReleaseHdc($hdc)
+    }
+    if (-not $ok) {
+        $gfx.CopyFromScreen($x, $y, 0, 0, $bmp.Size)
+    }
+}
+
 $dir = Split-Path -Parent $Output
 if ($dir -and -not (Test-Path $dir)) { New-Item -ItemType Directory -Path $dir | Out-Null }
 $bmp.Save($Output, [System.Drawing.Imaging.ImageFormat]::Png)

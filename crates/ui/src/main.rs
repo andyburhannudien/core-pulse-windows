@@ -2835,22 +2835,223 @@ impl App {
         let state = Arc::clone(&self.state.alerts);
 
         if state.active.is_empty() {
+            // Even with nothing firing, a monitoring tool should show what it
+            // is watching and with which thresholds. A blank screen does not
+            // tell the operator whether monitoring is even active.
             widgets::card(ui, |ui| {
-                ui.add_space(20.0);
-                ui.vertical_centered(|ui| {
+                ui.horizontal(|ui| {
                     widgets::dot(ui, p::GREEN, true);
-                    ui.label(RichText::new("No active alerts").size(13.0).strong());
+                    ui.label(RichText::new("No active alerts").size(12.5).strong());
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        ui.label(
+                            RichText::new("evaluated every second")
+                                .size(9.5)
+                                .color(p::TEXT_FAINT),
+                        );
+                        ui.label(
+                            RichText::new("MONITORING")
+                                .size(9.0)
+                                .extra_letter_spacing(1.0)
+                                .color(p::GREEN),
+                        );
+                    });
+                });
+                ui.add_space(4.0);
+                ui.label(
+                    RichText::new(
+                        "A condition must be sustained before it raises an alert, so a one-second \
+                         spike never notifies. Missing sensors never raise an alert at all.",
+                    )
+                    .size(10.0)
+                    .color(p::TEXT_DIM),
+                );
+            });
+
+            ui.add_space(10.0);
+
+            widgets::card(ui, |ui| {
+                widgets::section(ui, "Watch list", |ui| {
+                    let firing = state.active.len();
                     ui.label(
-                        RichText::new(
-                            "Thresholds are evaluated every second and only fire after the condition \
-                             is sustained: CPU 90% for 5 s, memory 90% for 5 s, disk temperature 55 °C \
-                             for 10 s, free space under 5% for 60 s. Missing sensors never raise an alert.",
-                        )
-                        .size(10.0)
-                        .color(p::TEXT_DIM),
+                        RichText::new(if firing == 0 {
+                            "all conditions nominal".to_string()
+                        } else {
+                            format!("{firing} firing")
+                        })
+                        .size(9.5)
+                        .color(p::TEXT_FAINT),
                     );
                 });
-                ui.add_space(20.0);
+                ui.add_space(4.0);
+
+                // (metric, warning, critical, sustain, current value if known)
+                let temp_max = self
+                    .state
+                    .snapshot
+                    .sensors
+                    .iter()
+                    .filter(|r| r.kind == core_pulse_core::model::SensorKind::Temperature)
+                    .map(|r| r.value)
+                    .reduce(f32::max);
+                let mem_pct = {
+                    let m = &self.state.snapshot.memory;
+                    if m.total_bytes > 0 {
+                        m.in_use_bytes as f32 / m.total_bytes as f32 * 100.0
+                    } else {
+                        0.0
+                    }
+                };
+                let disk_busy = self
+                    .state
+                    .snapshot
+                    .disks
+                    .iter()
+                    .map(|d| d.busy_percent)
+                    .fold(0.0f32, f32::max);
+                let min_free = self
+                    .state
+                    .snapshot
+                    .volumes
+                    .iter()
+                    .filter(|v| v.total_bytes >= 1024 * 1024 * 1024)
+                    .map(|v| {
+                        if v.total_bytes > 0 {
+                            v.free_bytes as f32 / v.total_bytes as f32 * 100.0
+                        } else {
+                            100.0
+                        }
+                    })
+                    .reduce(f32::min);
+
+                let rows: [(&str, &str, &str, &str, Option<String>); 4] = [
+                    (
+                        "CPU total",
+                        "90%",
+                        "97%",
+                        "5 s",
+                        Some(format!("{:.0}%", self.state.snapshot.cpu.total_percent)),
+                    ),
+                    (
+                        "Memory in use",
+                        "90%",
+                        "97%",
+                        "5 s",
+                        Some(format!("{mem_pct:.0}%")),
+                    ),
+                    (
+                        "Disk temperature",
+                        "55 °C",
+                        "60 °C",
+                        "10 s",
+                        temp_max.map(|t| format!("{t:.0} °C")),
+                    ),
+                    (
+                        "Free disk space",
+                        "< 5%",
+                        "< 2%",
+                        "60 s",
+                        min_free.map(|f| format!("{f:.0}% free")),
+                    ),
+                ];
+
+                // Header.
+                ui.horizontal(|ui| {
+                    ui.add_sized(
+                        [150.0, 14.0],
+                        egui::Label::new(
+                            RichText::new("CONDITION")
+                                .size(8.5)
+                                .extra_letter_spacing(0.8)
+                                .color(p::TEXT_FAINT),
+                        ),
+                    );
+                    ui.add_sized(
+                        [66.0, 14.0],
+                        egui::Label::new(
+                            RichText::new("WARNING")
+                                .size(8.5)
+                                .extra_letter_spacing(0.8)
+                                .color(p::TEXT_FAINT),
+                        ),
+                    );
+                    ui.add_sized(
+                        [66.0, 14.0],
+                        egui::Label::new(
+                            RichText::new("CRITICAL")
+                                .size(8.5)
+                                .extra_letter_spacing(0.8)
+                                .color(p::TEXT_FAINT),
+                        ),
+                    );
+                    ui.add_sized(
+                        [52.0, 14.0],
+                        egui::Label::new(
+                            RichText::new("SUSTAIN")
+                                .size(8.5)
+                                .extra_letter_spacing(0.8)
+                                .color(p::TEXT_FAINT),
+                        ),
+                    );
+                    ui.label(
+                        RichText::new("CURRENT")
+                            .size(8.5)
+                            .extra_letter_spacing(0.8)
+                            .color(p::TEXT_FAINT),
+                    );
+                });
+                ui.separator();
+
+                for (name, warn, crit, sustain, current) in rows {
+                    ui.horizontal(|ui| {
+                        ui.add_sized(
+                            [150.0, 16.0],
+                            egui::Label::new(RichText::new(name).size(10.5).color(p::TEXT)),
+                        );
+                        ui.add_sized(
+                            [66.0, 16.0],
+                            egui::Label::new(
+                                RichText::new(warn).size(10.0).monospace().color(p::AMBER),
+                            ),
+                        );
+                        ui.add_sized(
+                            [66.0, 16.0],
+                            egui::Label::new(
+                                RichText::new(crit).size(10.0).monospace().color(p::RED),
+                            ),
+                        );
+                        ui.add_sized(
+                            [52.0, 16.0],
+                            egui::Label::new(
+                                RichText::new(sustain)
+                                    .size(10.0)
+                                    .monospace()
+                                    .color(p::TEXT_FAINT),
+                            ),
+                        );
+                        match current {
+                            Some(v) => {
+                                ui.label(
+                                    RichText::new(v).size(10.0).monospace().color(p::TEXT_DIM),
+                                );
+                            }
+                            None => {
+                                ui.label(
+                                    RichText::new("— no source").size(10.0).color(p::TEXT_FAINT),
+                                )
+                                .on_hover_text(
+                                    "This metric has no reading, so it can never raise an alert.",
+                                );
+                            }
+                        }
+                    });
+                }
+
+                ui.add_space(6.0);
+                ui.separator();
+                ui.add_space(4.0);
+                widgets::kv_row(ui, "Cooldown after clearing", "5 minutes");
+                widgets::kv_row(ui, "Event log capacity", "20 entries");
+                widgets::kv_row(ui, "Busiest disk", &format!("{disk_busy:.0}%"));
             });
         } else {
             for a in &state.active {
