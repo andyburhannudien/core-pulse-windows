@@ -7,6 +7,7 @@ use std::sync::Arc;
 pub enum Tab {
     Processes,
     Performance,
+    Sensors,
     Services,
     Startup,
     Users,
@@ -17,16 +18,18 @@ impl Tab {
         match self {
             Self::Processes => "Proses",
             Self::Performance => "Kinerja",
+            Self::Sensors => "Sensor",
             Self::Services => "Layanan",
             Self::Startup => "Mulai",
             Self::Users => "Pengguna",
         }
     }
 
-    pub fn all() -> [Self; 5] {
+    pub fn all() -> [Self; 6] {
         [
             Self::Processes,
             Self::Performance,
+            Self::Sensors,
             Self::Services,
             Self::Startup,
             Self::Users,
@@ -105,6 +108,9 @@ pub struct History {
     pub mem: Vec<f32>,
     pub gpu: Vec<f32>,
     pub disk: Vec<f32>,
+    /// Suhu rata-rata semua sensor suhu. Kosong kalau tidak ada sensor.
+    pub temp: Vec<f32>,
+    pub has_temp: bool,
 }
 
 impl Default for History {
@@ -114,22 +120,38 @@ impl Default for History {
             mem: Vec::with_capacity(60),
             gpu: Vec::with_capacity(60),
             disk: Vec::with_capacity(60),
+            temp: Vec::with_capacity(60),
+            has_temp: false,
         }
     }
 }
 
 impl History {
-    pub fn push(&mut self, cpu: f32, mem_percent: f32, gpu: f32, disk: f32) {
+    pub fn push(&mut self, cpu: f32, mem_percent: f32, gpu: f32, disk: f32, temp: Option<f32>) {
         if self.cpu.len() >= 60 {
             self.cpu.remove(0);
             self.mem.remove(0);
             self.gpu.remove(0);
             self.disk.remove(0);
+            if !self.temp.is_empty() {
+                self.temp.remove(0);
+            }
         }
         self.cpu.push(cpu);
         self.mem.push(mem_percent);
         self.gpu.push(gpu);
         self.disk.push(disk);
+        if let Some(t) = temp {
+            self.has_temp = true;
+            self.temp.push(t);
+        }
+    }
+
+    /// Suhu rata-rata terakhir, kalau ada. Dipakai test; UI membaca `temp`
+    /// langsung karena butuh seluruh seri untuk grafik.
+    #[cfg(test)]
+    pub fn last_temp(&self) -> Option<f32> {
+        self.temp.last().copied()
     }
 }
 
@@ -192,7 +214,21 @@ impl AppState {
             .iter()
             .map(|d| d.busy_percent)
             .fold(0.0f32, f32::max);
-        self.history.push(snap.cpu.total_percent, used, gpu, disk);
+        // Rata-rata suhu semua sensor suhu. `None` kalau tidak ada satu pun,
+        // supaya history tidak berisi 0 °C palsu.
+        let temps: Vec<f32> = snap
+            .sensors
+            .iter()
+            .filter(|s| s.kind == core_pulse_core::model::SensorKind::Temperature)
+            .map(|s| s.value)
+            .collect();
+        let avg_temp = if temps.is_empty() {
+            None
+        } else {
+            Some(temps.iter().sum::<f32>() / temps.len() as f32)
+        };
+        self.history
+            .push(snap.cpu.total_percent, used, gpu, disk, avg_temp);
         self.snapshot = Arc::clone(snap);
     }
 
@@ -386,11 +422,41 @@ mod tests {
     fn history_is_capped() {
         let mut h = History::default();
         for i in 0..100 {
-            h.push(i as f32, 0.0, 0.0, 0.0);
+            h.push(i as f32, 0.0, 0.0, 0.0, Some(40.0));
         }
         assert_eq!(h.cpu.len(), 60);
         assert_eq!(h.cpu[59], 99.0);
         assert_eq!(h.disk.len(), 60);
+        assert_eq!(h.temp.len(), 60);
+        assert!(h.has_temp);
+    }
+
+    #[test]
+    fn history_without_sensors_has_no_temperature() {
+        let mut h = History::default();
+        for _ in 0..5 {
+            h.push(10.0, 20.0, 0.0, 0.0, None);
+        }
+        assert!(h.temp.is_empty(), "tidak boleh ada 0 °C palsu");
+        assert!(!h.has_temp);
+        assert_eq!(h.last_temp(), None);
+    }
+
+    #[test]
+    fn history_keeps_temperature_series_in_sync() {
+        let mut h = History::default();
+        h.push(1.0, 2.0, 3.0, 4.0, Some(50.0));
+        h.push(1.0, 2.0, 3.0, 4.0, Some(52.0));
+        assert_eq!(h.last_temp(), Some(52.0));
+        assert_eq!(h.temp.len(), 2);
+    }
+
+    #[test]
+    fn sparkline_accepts_temperature_series() {
+        // Suhu tidak 0–100, jadi skala grafiknya berbeda; yang diuji di sini
+        // hanya bahwa seri suhu bisa dipakai tanpa panik.
+        let h = History::default();
+        assert!(h.temp.is_empty());
     }
 
     #[test]

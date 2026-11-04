@@ -189,12 +189,16 @@ Jujur soal ini: beberapa hal belum bisa diuji di mesin pengembangan.
 
 | Item | Status | Cara verifikasi |
 |---|---|---|
-| SMART NVMe | **belum teruji** (tidak ada NVMe) | fixture dari dump `nvme smart-log` atau mesin lain |
+| SMART NVMe | **parser teruji fixture**, pembacaan butuh admin | fixture 318 K → 44,85 °C |
+| SMART ATA | **parser teruji fixture**, pembacaan butuh admin | fixture atribut 0xC2 → 41 °C |
 | NVML | **belum teruji** (tidak ada NVIDIA) | mesin dengan GTX/RTX |
-| IGCL Intel | **belum teruji** | iGPU UHD 630 di mesin ini, perlu eksperimen |
+| IGCL Intel | **belum teruji**, DLL tidak ada di mesin ini | mesin dengan Intel Arc |
 | ADLX AMD | **belum teruji** | mesin dengan Radeon |
-| LHM bridge | belum teruji | install LHM, aktifkan web server, port 8085 |
-| ACPI thermal zone | **terbukti kosong di sini** | perlu mesin lain (banyak laptop punya) |
+| LHM bridge | **belum teruji** (LHM tidak berjalan) | install LHM, aktifkan web server, port 8085 |
+| ACPI thermal zone | **terbukti kosong di sini** (0 instance) | mesin lain (banyak laptop punya) |
+
+Status ini juga dilaporkan runtime oleh `core-pulse-cli sensors`, jadi pengguna
+tidak perlu percaya dokumentasi saja.
 
 Sampai item di atas terverifikasi, dokumentasi pengguna harus menyebutnya sebagai
 "best effort", bukan "didukung".

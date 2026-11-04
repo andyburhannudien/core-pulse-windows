@@ -22,6 +22,7 @@ fn main() -> eframe::Result<()> {
     for arg in std::env::args().skip(1) {
         match arg.as_str() {
             "performance" | "--performance" => start_tab = state::Tab::Performance,
+            "sensors" | "--sensors" => start_tab = state::Tab::Sensors,
             "services" | "--services" => start_tab = state::Tab::Services,
             "startup" | "--startup" => start_tab = state::Tab::Startup,
             "users" | "--users" => start_tab = state::Tab::Users,
@@ -64,6 +65,7 @@ fn main() -> eframe::Result<()> {
 fn spawn_sampler(
     store: Arc<core_pulse_core::sampler::SnapshotStore>,
     slow: Arc<core_pulse_core::SlowStore>,
+    sensors: Arc<core_pulse_sensors::SensorStore>,
     ctx: egui::Context,
 ) {
     std::thread::Builder::new()
@@ -89,6 +91,9 @@ fn spawn_sampler(
                 ) {
                     snap.cpu.total_percent = 0.0;
                 }
+                // Salin hasil sensor terakhir ke snapshot. Sampler tidak pernah
+                // menyentuh hardware sensor sendiri.
+                sensors.apply_to(&mut snap);
                 store.store(snap);
                 ctx.request_repaint();
             }
@@ -117,7 +122,23 @@ impl App {
             Arc::clone(&slow),
             Some(Box::new(move || repaint_ctx.request_repaint())),
         );
-        spawn_sampler(Arc::clone(&store), slow, cc.egui_ctx.clone());
+
+        // Sensor hardware (SMART bisa 5–40 ms per disk, bridge HTTP 500 ms)
+        // juga di thread sendiri, 2 detik sekali.
+        let sensor_store = Arc::new(core_pulse_sensors::SensorStore::new());
+        let sensor_ctx = cc.egui_ctx.clone();
+        core_pulse_sensors::spawn_sensor_poller(
+            Arc::clone(&sensor_store),
+            core_pulse_sensors::Sensors::with_bridge(Self::bridge_enabled()),
+            Some(Box::new(move || sensor_ctx.request_repaint())),
+        );
+
+        spawn_sampler(
+            Arc::clone(&store),
+            Arc::clone(&slow),
+            Arc::clone(&sensor_store),
+            cc.egui_ctx.clone(),
+        );
         Self {
             state: AppState {
                 tab: start_tab,
@@ -126,6 +147,15 @@ impl App {
             },
             store,
         }
+    }
+
+    /// Bridge pihak ketiga hanya aktif kalau pengguna memintanya lewat
+    /// `--bridge` atau env var. Default mati (SENSORS.md §2 Tier 3).
+    fn bridge_enabled() -> bool {
+        std::env::args().any(|a| a == "--bridge")
+            || std::env::var("CORE_PULSE_LHM_BRIDGE")
+                .map(|v| v == "1")
+                .unwrap_or(false)
     }
 }
 
@@ -217,22 +247,36 @@ impl eframe::App for App {
                 ui.label(format!("uptime {}", format::uptime(s.host.uptime_secs)));
                 ui.separator();
                 // Suhu: jujur kalau tidak ada sumber (ADR-0008), bukan "0 °C".
-                let temp = s.gpus.iter().find_map(|g| g.temperature_c);
-                match temp {
-                    Some(t) => {
-                        ui.label(format!("Suhu {}", format::temp_c(Some(t))));
-                    }
-                    None => {
-                        ui.label(
-                            egui::RichText::new("Suhu tidak tersedia")
-                                .color(egui::Color32::from_rgb(0x9A, 0x9A, 0xA2)),
-                        )
-                        .on_hover_text(
-                            "Belum ada sumber sensor suhu yang aktif.\n\
-                             Thermal zone ACPI tidak diekspos firmware; sensor disk (SMART) \
-                             dan GPU menyusul di P3.",
-                        );
-                    }
+                let temps: Vec<f32> = s
+                    .sensors
+                    .iter()
+                    .filter(|r| r.kind == core_pulse_core::model::SensorKind::Temperature)
+                    .map(|r| r.value)
+                    .collect();
+                if temps.is_empty() {
+                    ui.label(
+                        egui::RichText::new("Suhu tidak tersedia")
+                            .color(egui::Color32::from_rgb(0x9A, 0x9A, 0xA2)),
+                    )
+                    .on_hover_text(
+                        "Tidak ada sumber suhu yang aktif.\n\
+                         Thermal zone ACPI tidak diekspos firmware mesin ini; \
+                         suhu disk butuh helper (P4). Buka tab Sensor untuk detail.",
+                    );
+                } else {
+                    let max = temps.iter().copied().fold(f32::MIN, f32::max);
+                    let label = if temps.len() == 1 {
+                        format!("Suhu {max:.0} °C")
+                    } else {
+                        format!("Suhu maks {max:.0} °C ({} sumber)", temps.len())
+                    };
+                    ui.label(label).on_hover_text(
+                        temps
+                            .iter()
+                            .map(|t| format!("{t:.0} °C"))
+                            .collect::<Vec<_>>()
+                            .join("  ·  "),
+                    );
                 }
                 if !s.degraded.is_empty() {
                     ui.separator();
@@ -268,6 +312,7 @@ impl eframe::App for App {
                 // scroll supaya tidak ada kartu yang terpotong di 560 px.
                 egui::ScrollArea::vertical().show(ui, |ui| self.performance(ui));
             }
+            Tab::Sensors => self.sensors(ui),
             Tab::Services => self.services(ui),
             Tab::Startup => self.startup(ui),
             Tab::Users => self.users(ui),
@@ -656,6 +701,201 @@ impl App {
         if close {
             self.state.detail_pid = None;
         }
+    }
+
+    /// Tab Sensor: pohon sensor per komponen, plus penjelasan jujur untuk
+    /// sumber yang tidak tersedia.
+    fn sensors(&mut self, ui: &mut egui::Ui) {
+        use core_pulse_core::model::{SensorAvailability, SensorKind};
+
+        let s = Arc::clone(&self.state.snapshot);
+        ui.horizontal(|ui| {
+            ui.heading("Sensor");
+            ui.label(
+                egui::RichText::new(format!(
+                    "{} bacaan · {} sumber",
+                    s.sensors.len(),
+                    s.sensor_status.len()
+                ))
+                .weak()
+                .size(11.0),
+            );
+        });
+        ui.add_space(6.0);
+
+        egui::ScrollArea::vertical().show(ui, |ui| {
+            // --- Suhu per komponen ---
+            let temps: Vec<_> = s
+                .sensors
+                .iter()
+                .filter(|r| r.kind == SensorKind::Temperature)
+                .collect();
+
+            egui::Frame::group(ui.style()).show(ui, |ui| {
+                ui.vertical(|ui| {
+                    ui.label(egui::RichText::new("Suhu").strong());
+                    if temps.is_empty() {
+                        ui.label(
+                            egui::RichText::new("— tidak ada sumber suhu yang aktif")
+                                .weak()
+                                .size(11.0),
+                        );
+                    } else {
+                        for r in &temps {
+                            ui.horizontal(|ui| {
+                                ui.label(
+                                    egui::RichText::new(format::truncate(&r.label, 46))
+                                        .monospace(),
+                                );
+                                ui.with_layout(
+                                    egui::Layout::right_to_left(egui::Align::Center),
+                                    |ui| {
+                                        ui.label(
+                                            egui::RichText::new(format!("{:.0} °C", r.value))
+                                                .strong()
+                                                .monospace(),
+                                        );
+                                        // Penanda kepercayaan: hanya `Direct`
+                                        // yang benar-benar dari sensor hardware.
+                                        let (mark, tip) = match r.confidence {
+                                            core_pulse_core::model::Confidence::Direct => {
+                                                ("", "dibaca langsung dari sensor")
+                                            }
+                                            core_pulse_core::model::Confidence::Derived => {
+                                                ("≈", "diturunkan (zona ACPI, bukan suhu die)")
+                                            }
+                                            core_pulse_core::model::Confidence::ThirdParty => (
+                                                "◇",
+                                                "pihak ketiga (LibreHardwareMonitor)",
+                                            ),
+                                        };
+                                        if !mark.is_empty() {
+                                            ui.label(
+                                                egui::RichText::new(mark)
+                                                    .weak()
+                                                    .size(10.0),
+                                            )
+                                            .on_hover_text(tip);
+                                        }
+                                    },
+                                );
+                            });
+                        }
+                    }
+                });
+            });
+
+            ui.add_space(8.0);
+
+            // --- Sumber yang tidak tersedia, dengan alasannya ---
+            egui::Frame::group(ui.style()).show(ui, |ui| {
+                ui.vertical(|ui| {
+                    ui.label(egui::RichText::new("Status sumber").strong());
+                    for st in &s.sensor_status {
+                        ui.horizontal(|ui| {
+                            let (dot, color) = match &st.availability {
+                                SensorAvailability::Available => {
+                                    ("●", egui::Color32::from_rgb(0x4A, 0xC0, 0x7A))
+                                }
+                                SensorAvailability::NeedsElevation => {
+                                    ("●", egui::Color32::from_rgb(0xE0, 0xA0, 0x30))
+                                }
+                                _ => ("○", ui.visuals().weak_text_color()),
+                            };
+                            ui.label(egui::RichText::new(dot).color(color));
+                            ui.label(
+                                egui::RichText::new(format!("{:<14}", st.provider))
+                                    .monospace()
+                                    .size(11.0),
+                            );
+                            let text = match &st.availability {
+                                SensorAvailability::Available => "tersedia".to_string(),
+                                SensorAvailability::NeedsElevation => {
+                                    "butuh administrator (helper, P4)".to_string()
+                                }
+                                SensorAvailability::NotAvailable { reason } => {
+                                    format!("tidak tersedia — {reason}")
+                                }
+                                SensorAvailability::Failed { error } => {
+                                    format!("gagal — {error}")
+                                }
+                            };
+                            ui.label(egui::RichText::new(text).weak().size(11.0));
+                        });
+                    }
+                });
+            });
+
+            ui.add_space(8.0);
+
+            // --- Penjelasan: kenapa suhu CPU sering tidak ada ---
+            let cpu_missing = !s
+                .sensor_status
+                .iter()
+                .any(|st| st.provider == "acpi-pdh"
+                    && matches!(st.availability, SensorAvailability::Available));
+            if cpu_missing {
+                egui::Frame::group(ui.style()).show(ui, |ui| {
+                    ui.vertical(|ui| {
+                        ui.label(
+                            egui::RichText::new("Kenapa suhu CPU tidak muncul?")
+                                .strong(),
+                        );
+                        ui.label(
+                            egui::RichText::new(
+                                "Windows tidak menyediakan API user-mode untuk suhu CPU. Satu-satunya \
+                                 jalur resmi adalah thermal zone ACPI, dan banyak firmware — termasuk \
+                                 mesin ini — tidak mengeksposnya.\n\n\
+                                 Pilihan yang tersedia:\n\
+                                 • Pasang helper (P4) untuk membaca SMART disk dan sensor yang butuh admin.\n\
+                                 • Aktifkan bridge LibreHardwareMonitor bila sudah menjalankannya.\n\n\
+                                 Kami tidak menampilkan angka perkiraan. Lebih baik tidak ada angka \
+                                 daripada angka yang salah.",
+                            )
+                            .weak()
+                            .size(11.0),
+                        );
+                    });
+                });
+            }
+
+            // --- Sensor non-suhu (fan, wear) ---
+            let others: Vec<_> = s
+                .sensors
+                .iter()
+                .filter(|r| r.kind != SensorKind::Temperature)
+                .collect();
+            if !others.is_empty() {
+                ui.add_space(8.0);
+                egui::Frame::group(ui.style()).show(ui, |ui| {
+                    ui.vertical(|ui| {
+                        ui.label(egui::RichText::new("Lainnya").strong());
+                        for r in &others {
+                            ui.horizontal(|ui| {
+                                ui.label(
+                                    egui::RichText::new(format::truncate(&r.label, 46))
+                                        .monospace()
+                                        .size(11.0),
+                                );
+                                ui.with_layout(
+                                    egui::Layout::right_to_left(egui::Align::Center),
+                                    |ui| {
+                                        ui.label(
+                                            egui::RichText::new(format!(
+                                                "{:.0} {:?}",
+                                                r.value, r.unit
+                                            ))
+                                            .monospace()
+                                            .size(11.0),
+                                        );
+                                    },
+                                );
+                            });
+                        }
+                    });
+                });
+            }
+        });
     }
 
     fn services(&mut self, ui: &mut egui::Ui) {
@@ -1249,7 +1489,7 @@ impl App {
                 ui.label(egui::RichText::new("Riwayat 60 detik").strong());
                 let hist = &self.state.history;
                 let w = ui.available_width();
-                let rows: [(&[f32], egui::Color32, &str); 4] = [
+                let rows: [(&[f32], egui::Color32, &str); 5] = [
                     (&hist.cpu, egui::Color32::from_rgb(0x4A, 0x9E, 0xFF), "CPU"),
                     (&hist.mem, egui::Color32::from_rgb(0x4A, 0xC0, 0x7A), "RAM"),
                     (&hist.gpu, egui::Color32::from_rgb(0xB0, 0x7A, 0xE0), "GPU"),
@@ -1258,12 +1498,26 @@ impl App {
                         egui::Color32::from_rgb(0xE0, 0xA0, 0x30),
                         "Disk",
                     ),
+                    (
+                        &hist.temp,
+                        egui::Color32::from_rgb(0xE0, 0x5A, 0x5A),
+                        "Suhu",
+                    ),
                 ];
-                for (i, (values, color, label)) in rows.into_iter().enumerate() {
-                    if i > 0 {
+                let mut first = true;
+                for (values, color, label) in rows.into_iter() {
+                    // Seri suhu hanya ditampilkan kalau benar-benar ada data;
+                    // grafik kosong lebih membingungkan daripada tidak ada.
+                    if label == "Suhu" && !hist.has_temp {
+                        continue;
+                    }
+                    if !first {
                         ui.add_space(4.0);
                     }
-                    draw_sparkline(ui, values, w, 0.0..=100.0, color, label);
+                    first = false;
+                    // Suhu punya rentang 0–110 °C, bukan 0–100%.
+                    let max = if label == "Suhu" { 110.0 } else { 100.0 };
+                    draw_sparkline(ui, values, w, 0.0..=max, color, label);
                 }
             });
         });

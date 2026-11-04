@@ -36,8 +36,10 @@ jalan dan **mengatakan terus terang** sensor mana yang tidak tersedia.
 
 ![Panel detail proses](docs/images/detail.png)
 
-*Build P2 pada i5-9500T / 8 GB / Windows 11 build 26100. Tab Sensor dan helper
-elevated menyusul di P3–P4.*
+![Tab Sensor](docs/images/sensors.png)
+
+*Build P3 pada i5-9500T / 8 GB / Windows 11 build 26100. Suhu disk menunggu
+helper elevated (P4); status itu ditampilkan apa adanya, bukan angka palsu.*
 
 ## Status
 
@@ -54,8 +56,10 @@ elevated menyusul di P3–P4.*
 | CLI (`top`, `doctor`, `bench`, `compare`, `verify`, `action-selftest`, `services`, `startup`, `users`, `record`) | **Berfungsi** |
 | Gate G0 (akurasi CPU + budget performa) | **LULUS** — [P0-RESULTS.md](docs/P0-RESULTS.md) |
 | Gate G1 (disk/net/GPU + I/O nyata) | **LULUS** — [P1-RESULTS.md](docs/P1-RESULTS.md) |
-| Gate G2 (aksi proses + PID reuse) | **LULUS** — [P2-RESULTS.md](docs/P2-RESULTS.md) |
-| Sensor framework + SMART | Belum ada — P3 |
+| Gate G2 (aksi proses + PID reuse) | **LULUS** - [P2-RESULTS.md](docs/P2-RESULTS.md) |
+| Gate G3 (sensor + SMART) | **Sebagian** - [P3-RESULTS.md](docs/P3-RESULTS.md) |
+| Sensor framework + SMART + GPU | **Berfungsi** - suhu disk menunggu helper (P4) |
+| Tab Sensor | **Berfungsi** — status per provider + penjelasan jujur |
 | Helper elevated | Belum ada — P4 |
 | Installer | Belum ada — P5 |
 
@@ -100,6 +104,7 @@ Detail setup ada di [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md).
 | [docs/P0-RESULTS.md](docs/P0-RESULTS.md) | Hasil P0: bukti Gate G0, angka terukur, temuan |
 | [docs/P1-RESULTS.md](docs/P1-RESULTS.md) | Hasil P1: bukti Gate G1, verifikasi I/O nyata, temuan |
 | [docs/P2-RESULTS.md](docs/P2-RESULTS.md) | Hasil P2: bukti Gate G2, guard PID reuse, temuan |
+| [docs/P3-RESULTS.md](docs/P3-RESULTS.md) | Hasil P3: bukti Gate G3 (sebagian), probe akses SMART, fixture replay |
 | [docs/ENVIRONMENT-AUDIT.md](docs/ENVIRONMENT-AUDIT.md) | Hasil audit mesin pengembangan (fakta, bukan asumsi) |
 | [docs/ROADMAP.md](docs/ROADMAP.md) | Fase P0–P5, gate yang harus lulus |
 | [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) | Setup toolchain, perintah build, troubleshooting |

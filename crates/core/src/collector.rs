@@ -234,6 +234,10 @@ impl Collector {
             services: slow.services,
             startup: slow.startup,
             sessions,
+            // Sensor diisi pemanggil (`Sensors::apply`), bukan oleh collector
+            // inti: crate sensors bergantung pada core, bukan sebaliknya.
+            sensors: Vec::new(),
+            sensor_status: Vec::new(),
             degraded,
         }
     }

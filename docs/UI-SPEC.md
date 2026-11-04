@@ -219,7 +219,7 @@ Status implementasi per bagian spesifikasi ini:
 | §2 kerangka window (nav, toolbar, status bar) | **Selesai** |
 | §3 tab Proses (kolom, sort, search, virtualized) | **Selesai** untuk Nama/PID/CPU/Memori/GPU/Thread/Handle |
 | §4 tab Kinerja (CPU, memori, disk, GPU, jaringan, grafik) | **Selesai** |
-| §5 tab Sensor | Belum (P3) |
+| §5 tab Sensor | **Selesai** (status per provider + penjelasan; angka menunggu helper P4) |
 | §6 tab lain (Layanan, Mulai, Pengguna) | **Selesai** |
 | §7 menu kontekstual | **Selesai** (affinity & properti file belum) |
 | §8 keyboard | Belum (P5) |

@@ -14,7 +14,7 @@ diaudit (lihat [ENVIRONMENT-AUDIT.md](ENVIRONMENT-AUDIT.md)).
 | ~~P0~~ | ~~Toolchain + skeleton + spike angka~~ | ~~1–2 hari~~ | **G0 LULUS** — [P0-RESULTS.md](P0-RESULTS.md) |
 | ~~P1~~ | ~~Paritas Task Manager (proses + performance)~~ | ~~1–1,5 minggu~~ | **G1 LULUS** — [P1-RESULTS.md](P1-RESULTS.md) |
 | ~~P2~~ | ~~Aksi proses + tab Services/Startup/Users/Details~~ | ~~1 minggu~~ | **G2 LULUS** — [P2-RESULTS.md](P2-RESULTS.md) |
-| P3 | Sensor framework + SMART + GPU + dashboard | 1–1,5 minggu | G3: suhu disk muncul, status CPU jelas |
+| P3 | Sensor framework + SMART + GPU + dashboard | 1–1,5 minggu | **G3 sebagian** — [P3-RESULTS.md](P3-RESULTS.md) |
 | P4 | Helper elevated + alert + riwayat + tray | 1 minggu | G4: helper mati → UI tetap benar |
 | P5 | Installer, docs pengguna, CI lengkap | 3–5 hari | G5: install di mesin bersih tanpa admin |
 
@@ -115,25 +115,39 @@ Yang dibangun:
 Belum ada (disengaja): start/stop layanan (butuh admin, P4), hapus entri startup,
 affinity CPU.
 
-## P3 — Sensor (1–1,5 minggu)
+## P3 — Sensor (1–1,5 minggu) — **SELESAI (G3 sebagian)**
 
-1. Trait `SensorProvider` + registry provider + `probe()` berkala 30 detik.
-2. Provider ACPI/PDH (Tier 0).
-3. Provider SMART (Tier 1) — port dari `disk-pulse`, termasuk parser dan test.
-4. Provider GPU: NVML, IGCL, ADLX (Tier 2).
-5. Bridge LHM + HWiNFO (Tier 3), opt-in, default mati.
-6. UI: dashboard sensor, grafik suhu vs beban, panel "Kenapa?" per sensor.
-7. `core-pulse-cli doctor` melaporkan ketersediaan setiap provider.
+Hasil lengkap, bukti, dan 9 keputusan teknis ada di
+[P3-RESULTS.md](P3-RESULTS.md). Ringkas: framework sensor, provider ACPI/PDH,
+SMART (NVMe + ATA), NVML/IGCL, dan bridge LHM sudah berfungsi; parser teruji
+lewat fixture 512 byte; nilai di luar rentang fisik dibuang; sensor berjalan di
+thread sendiri sehingga snapshot tetap 40 ms.
 
-**Gate G3:**
+**Satu kriteria Gate G3 belum bisa dipenuhi di mesin ini**: suhu 2 HDD muncul.
+SMART memerlukan `GENERIC_READ` pada `\\.\PhysicalDriveN`, dan itu ditolak tanpa
+elevasi (dibuktikan dengan `example smart-access-probe`: `0x0001` untuk akses 0,
+`0x0005` untuk `GENERIC_READ`). Solusinya helper elevated di P4 — bukan trik
+user-mode.
 
-- Di mesin pengembangan: suhu 2 HDD (SATA SMART) muncul dan masuk akal
-  (25–45 °C saat idle).
-- Suhu CPU menampilkan status `NeedsElevation` atau `NotAvailable` dengan
-  penjelasan yang benar — **bukan** angka.
-- Di mesin dengan NVMe/NVIDIA: suhu terbaca (perlu verifikasi di hardware lain,
-  lihat [SENSORS.md §7](SENSORS.md#7-yang-perlu-diverifikasi-di-mesin-nyata)).
-- Total waktu satu siklus semua provider < 100 ms.
+Yang dibangun:
+
+1. Trait `SensorProvider` + registry + `probe()` berkala 30 detik + `SensorStore`.
+2. Provider ACPI/PDH (Tier 0) dengan normalisasi Kelvin/Kelvin×10/Celsius.
+3. Provider SMART (Tier 1): NVMe health log + ATA SMART READ DATA + SAT fallback.
+4. Provider GPU: NVML (path absolut, 6 fungsi), IGCL (dimuat, suhu belum), ADLX (belum).
+5. Bridge LHM (Tier 3), opt-in, loopback-only, 2 MB cap, tanpa redirect.
+6. Tab Sensor + status bar + sparkline suhu; panel "Kenapa suhu CPU tidak muncul?".
+7. `core-pulse-cli sensors` melaporkan status tiap provider.
+
+**Gate G3 — hasil:**
+
+| Kriteria | Hasil |
+|---|---|
+| Suhu 2 HDD | **belum** — butuh helper (P4), terbukti dengan probe |
+| Status suhu CPU jelas | LULUS — "tidak mengekspos ACPI thermal zone (0 instance)" |
+| Tidak ada angka palsu | LULUS — 0 bacaan, 0 `0 °C` |
+| Parser NVMe/ATA teruji | LULUS — fixture → 44,85 °C / 41 °C |
+| Satu siklus provider | LULUS — p95 40 ms (di thread terpisah) |
 
 ## P4 — Helper, alert, riwayat (1 minggu)
 

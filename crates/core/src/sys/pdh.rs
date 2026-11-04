@@ -68,11 +68,27 @@ impl Drop for Query {
     }
 }
 
+// `PDH_HQUERY` adalah pointer mentah, jadi tidak otomatis `Send`. Handle ini
+// tidak dibagi antar thread: ia dimiliki satu `Query` dan hanya dipakai oleh
+// thread yang sedang memegang `&mut Query` (registry sensor memindahkan
+// kepemilikan, tidak menyalinnya). PDH sendiri aman dipakai dari thread mana pun
+// selama satu query tidak dipakai bersamaan dari dua thread.
+//
+// SAFETY: kepemilikan tunggal dijaga oleh tipe (`Query` tidak `Clone`, dan
+// `Counter` hanya bisa dipakai lewat `&Query`).
+unsafe impl Send for Query {}
+
 /// Handle counter. Valid selama `Query` pemiliknya hidup; tidak punya `Drop`.
 #[derive(Clone, Copy)]
 pub struct Counter {
     handle: PDH_HCOUNTER,
 }
+
+// Alasan yang sama dengan `Query`: `Counter` hanya bisa dipakai lewat
+// `&Query`/`&Counter` milik satu thread, tidak pernah dibagi.
+//
+// SAFETY: tidak ada akses bersamaan; kepemilikan tunggal dijaga tipe.
+unsafe impl Send for Counter {}
 
 impl Counter {
     /// Nilai tunggal. `None` kalau counter belum punya data (sampel pertama)

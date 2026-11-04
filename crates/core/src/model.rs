@@ -31,6 +31,13 @@ pub struct Snapshot {
     pub startup: Vec<StartupEntry>,
     #[serde(default)]
     pub sessions: Vec<SessionRow>,
+    /// Bacaan sensor terbaru. Kosong berarti belum ada sumber yang tersedia —
+    /// bukan berarti semua suhu nol.
+    #[serde(default)]
+    pub sensors: Vec<SensorReading>,
+    /// Status tiap provider sensor (tersedia / butuh elevasi / tidak ada).
+    #[serde(default)]
+    pub sensor_status: Vec<SensorStatus>,
     pub degraded: Vec<Degradation>,
 }
 
@@ -53,6 +60,8 @@ impl Snapshot {
             services: Vec::new(),
             startup: Vec::new(),
             sessions: Vec::new(),
+            sensors: Vec::new(),
+            sensor_status: Vec::new(),
             degraded: Vec::new(),
         }
     }
@@ -530,6 +539,28 @@ pub struct SensorReading {
     pub source: SensorSource,
     pub confidence: Confidence,
     pub ts_unix_ms: u64,
+    /// `Some` kalau nilai ini berasal dari disk fisik (indeks `PhysicalDriveN`).
+    /// Dipakai UI untuk mengelompokkan sensor per disk.
+    #[serde(default)]
+    pub disk_index: Option<u32>,
+}
+
+/// Status satu provider sensor, dilaporkan ke UI apa adanya.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SensorStatus {
+    pub provider: String,
+    pub availability: SensorAvailability,
+}
+
+/// Ketersediaan provider sensor. `NeedsElevation` dan `NotAvailable` sengaja
+/// dibedakan: tindakan pengguna berbeda (pasang helper vs memang tidak ada).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "camelCase")]
+pub enum SensorAvailability {
+    Available,
+    NeedsElevation,
+    NotAvailable { reason: String },
+    Failed { error: String },
 }
 
 #[cfg(test)]

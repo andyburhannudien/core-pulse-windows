@@ -62,6 +62,15 @@ enum Command {
     Startup,
     /// Daftar sesi pengguna.
     Users,
+    /// Tampilkan status dan bacaan semua provider sensor (Gate G3).
+    Sensors {
+        /// Aktifkan bridge LibreHardwareMonitor (opt-in, default mati).
+        #[arg(long)]
+        bridge: bool,
+        /// Jumlah sampel berturut-turut.
+        #[arg(long, default_value_t = 2)]
+        samples: u32,
+    },
     /// Rekam N snapshot ke file untuk fixture test.
     Record {
         #[arg(long, default_value = "fixture.json")]
@@ -96,6 +105,7 @@ fn main() -> anyhow::Result<()> {
         Command::Services { limit } => list_services(limit),
         Command::Startup => list_startup(),
         Command::Users => list_users(),
+        Command::Sensors { bridge, samples } => list_sensors(bridge, samples),
         Command::Record { out, samples } => record(&out, samples),
     }
 }
@@ -633,6 +643,104 @@ fn availability(count: usize, unit: &str) -> String {
     } else {
         format!("tersedia ({count} {unit})")
     }
+}
+
+/// Tampilkan status semua provider sensor beserta bacaannya (Gate G3).
+///
+/// Ini alat verifikasi yang sama yang dipakai untuk memutuskan apakah fitur
+/// "monitoring suhu" benar-benar berfungsi di sebuah mesin — bukan asumsi.
+fn list_sensors(enable_bridge: bool, samples: u32) -> anyhow::Result<()> {
+    use core_pulse_sensors::Availability;
+
+    let mut sensors = core_pulse_sensors::Sensors::with_bridge(enable_bridge);
+    println!("core-pulse sensors (bridge: {enable_bridge})");
+    println!(
+        "Provider: acpi-pdh, smart, gpu-vendor{}\n",
+        if enable_bridge { ", lhm-bridge" } else { "" }
+    );
+
+    sensors.probe_all(true);
+
+    println!("Status provider:");
+    let statuses: Vec<(String, String)> = sensors
+        .statuses()
+        .map(|(id, a)| {
+            let text = match a {
+                Availability::Available => "tersedia".to_string(),
+                Availability::NeedsElevation => "butuh administrator (helper P4)".to_string(),
+                Availability::NotAvailable(why) => format!("tidak tersedia: {why}"),
+                Availability::Failed(e) => format!("gagal: {e}"),
+            };
+            (id.to_string(), text)
+        })
+        .collect();
+    for (id, text) in &statuses {
+        println!("  {id:<14} {text}");
+    }
+
+    for i in 0..samples.max(1) {
+        if i > 0 {
+            std::thread::sleep(Duration::from_secs(2));
+        }
+        let report = sensors.poll();
+        println!("\nSampel {}: {} bacaan", i + 1, report.readings.len());
+        if report.readings.is_empty() {
+            println!("  (tidak ada sensor yang bisa dibaca — lihat status di atas)");
+            continue;
+        }
+        println!(
+            "  {:<28} {:>9} {:<9} {:<12} {:<12} ID",
+            "LABEL", "NILAI", "SATUAN", "SUMBER", "CONFIDENCE"
+        );
+        for r in &report.readings {
+            println!(
+                "  {:<28} {:>9.1} {:<9} {:<12} {:<12} {}",
+                truncate(&r.label, 28),
+                r.value,
+                format!("{:?}", r.unit),
+                format!("{:?}", r.source),
+                format!("{:?}", r.confidence),
+                r.id
+            );
+        }
+    }
+
+    // Verdict Gate G3, dihitung dari data yang benar-benar terbaca.
+    let report = sensors.poll();
+    let disk_temps: Vec<_> = report
+        .readings
+        .iter()
+        .filter(|r| r.disk_index.is_some())
+        .collect();
+    let cpu_status = statuses
+        .iter()
+        .find(|(id, _)| id == "acpi-pdh")
+        .map(|(_, t)| t.clone())
+        .unwrap_or_default();
+
+    println!("\nG3:");
+    println!(
+        "  suhu disk           : {}",
+        if disk_temps.is_empty() {
+            "belum terbaca".to_string()
+        } else {
+            format!(
+                "{} sensor ({})",
+                disk_temps.len(),
+                disk_temps
+                    .iter()
+                    .map(|r| format!("{:.0} °C", r.value))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+        }
+    );
+    println!("  suhu CPU            : {cpu_status}");
+    println!(
+        "  catatan             : suhu CPU tidak tersedia bukan bug; firmware mesin ini \
+         tidak mengekspos ACPI thermal zone (docs/ENVIRONMENT-AUDIT.md)"
+    );
+    Ok(())
 }
 
 /// Byte → "1.2 GB" untuk keluaran CLI.
