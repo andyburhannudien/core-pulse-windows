@@ -741,6 +741,7 @@ dependencies = [
  "anyhow",
  "clap",
  "core-pulse-core",
+ "core-pulse-ipc",
  "core-pulse-sensors",
  "serde",
  "serde_json",
@@ -767,11 +768,13 @@ name = "core-pulse-helper"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "arc-swap",
  "core-pulse-core",
  "core-pulse-ipc",
  "core-pulse-sensors",
  "tracing",
  "tracing-subscriber",
+ "windows",
 ]
 
 [[package]]
@@ -782,6 +785,8 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror 2.0.21",
+ "tracing",
+ "windows",
 ]
 
 [[package]]
@@ -790,6 +795,7 @@ version = "0.1.0"
 dependencies = [
  "arc-swap",
  "core-pulse-core",
+ "core-pulse-ipc",
  "libloading 0.9.0",
  "serde",
  "serde_json",
@@ -812,6 +818,7 @@ dependencies = [
  "egui_plot",
  "tracing",
  "tracing-subscriber",
+ "windows",
 ]
 
 [[package]]

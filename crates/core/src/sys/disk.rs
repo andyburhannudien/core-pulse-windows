@@ -86,7 +86,7 @@ impl DiskCollector {
             degraded.push(Degradation {
                 area: crate::model::Area::Disk,
                 reason: DegradeReason::ApiFailed,
-                detail: "PdhOpenQueryW gagal; throughput disk tidak tersedia".into(),
+                detail: "PdhOpenQueryW failed; disk throughput unavailable".into(),
             });
         }
 
@@ -117,7 +117,7 @@ impl DiskCollector {
                 } else {
                     DegradeReason::ApiFailed
                 },
-                detail: "tidak ada instance PhysicalDisk dari PDH".into(),
+                detail: "PDH returned no PhysicalDisk instance".into(),
             });
         }
 
@@ -166,7 +166,7 @@ impl DiskCollector {
             degraded.push(Degradation {
                 area: crate::model::Area::Disk,
                 reason: DegradeReason::AccessDenied,
-                detail: "tidak ada volume yang bisa dibaca".into(),
+                detail: "no readable volume".into(),
             });
         }
 

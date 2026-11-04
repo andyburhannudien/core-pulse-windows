@@ -1,204 +1,243 @@
-# Sensor suhu
+# Temperature sensors
 
-Ini bagian tersulit dari proyek, dan bagian yang paling mudah dibuat tidak jujur.
-Dokumen ini menjelaskan dari mana setiap angka berasal, apa yang terjadi kalau
-sumbernya tidak ada, dan kenapa beberapa pendekatan populer sengaja tidak dipakai.
+This is the hardest part of the project, and the part most easily made
+dishonest. This document explains where each number comes from, what happens
+when the source is missing, and why several popular approaches are deliberately
+not used.
 
-## 1. Masalah inti
+## 1. The core problem
 
-Windows tidak menyediakan API user-mode untuk suhu CPU. Yang tersedia hanya
-jalur ACPI, dan jalur itu bergantung pada firmware. Banyak mesin — termasuk mesin
-pengembangan proyek ini — tidak mengeksposnya sama sekali.
+Windows provides no user-mode API for CPU temperature. The only official path is
+ACPI, and that depends on firmware. Many machines — including this project's
+development machine — expose none at all.
 
-Fakta dari audit mesin pengembangan (HP 85A2, i5-9500T, Windows 11 build 26100):
+Facts from the development machine audit (HP 85A2, i5-9500T, Windows 11 build
+26100):
 
-| Jalur | Kelas/counter | Hasil |
+| Path | Class/counter | Result |
 |---|---|---|
-| `root\WMI` → `MSAcpi_ThermalZoneTemperature` | kelas ada | **0 instance** |
-| PDH `\Thermal Zone Information(*)\Temperature` | counter set ada | **0 instance** |
-| `Win32_PerfFormattedData_Counters_ThermalZoneInformation` | — | kosong |
-| `root\HP` | namespace ada | tidak ada kelas thermal |
-| SMART disk SATA | `IOCTL_STORAGE_QUERY_PROPERTY` | tersedia (2 HDD) |
-| NVML | tidak ada GPU NVIDIA | tidak berlaku |
-| iGPU Intel UHD 630 | IGCL belum diuji | kemungkinan tersedia |
+| `root\WMI` → `MSAcpi_ThermalZoneTemperature` | class exists | **0 instances** |
+| PDH `\Thermal Zone Information(*)\Temperature` | counter set exists | **0 instances** |
+| `Win32_PerfFormattedData_Counters_ThermalZoneInformation` | — | empty |
+| `root\HP` | namespace exists | no thermal class |
+| SATA disk SMART | `IOCTL_STORAGE_QUERY_PROPERTY` | present (2 HDDs) |
+| NVML | no NVIDIA GPU | not applicable |
+| Intel UHD 630 iGPU | IGCL not yet usable here | possibly available |
 
-Konsekuensi desain: **aplikasi harus dirancang untuk hidup tanpa suhu CPU.**
-Bukan sebagai edge case, tapi sebagai keadaan normal di sebagian mesin.
+Design consequence: **the application must be designed to live without CPU
+temperature.** Not as an edge case, but as the normal state on some machines.
 
-## 2. Tier sumber
+## 2. Source tiers
 
 ```
-Tier 0  ACPI / PDH thermal zone        user-mode, gratis, sering kosong
-Tier 1  SMART disk (NVMe/ATA)          user-mode, butuh admin untuk sebagian disk
-Tier 2  GPU vendor SDK                 user-mode, butuh driver vendor (sudah terpasang)
-Tier 3  Bridge ke monitor eksternal    user-mode, opt-in, bergantung pihak ketiga
-Tier 4  Driver kernel sendiri          TIDAK DIPAKAI di v1
+Tier 0  ACPI / PDH thermal zone        user-mode, free, often empty
+Tier 1  Disk SMART (NVMe/ATA)          user-mode, needs admin for some disks
+Tier 2  GPU vendor SDK                 user-mode, needs the vendor driver
+Tier 3  Bridge to an external monitor  user-mode, opt-in, third-party dependent
+Tier 4  Our own kernel driver          NOT USED in v1
 ```
 
 ### Tier 0 — ACPI / PDH
 
-Dua jalur, dicoba berurutan:
+Two paths, tried in order:
 
-1. PDH counter `\Thermal Zone Information(*)\Temperature` dan
-   `\High Precision Temperature` (Kelvin × 10 / Kelvin). Lebih murah dari WMI
-   dan tidak butuh COM.
-2. `MSAcpi_ThermalZoneTemperature` via WMI, sebagai fallback.
+1. PDH counters `\Thermal Zone Information(*)\Temperature` and
+   `\High Precision Temperature` (Kelvin × 10 / Kelvin). Cheaper than WMI and
+   needs no COM.
+2. `MSAcpi_ThermalZoneTemperature` via WMI, as a fallback.
 
-Kalau keduanya kosong: `Degradation { area: Sensors, reason: NotAvailable }`.
-Tidak ada percobaan membaca registry BIOS atau trik lain — itu rapuh dan tidak
-portabel antar vendor.
+If both are empty: `Degradation { area: Sensors, reason: NotAvailable }`. No
+attempt is made to read BIOS registers or any other trick — that is fragile and
+not portable across vendors.
 
-Catatan: pada banyak laptop, thermal zone ACPI mengukur **zona chassis**, bukan
-die CPU. Nilainya bisa 15–25 °C di bawah suhu die. Karena itu `confidence` untuk
-jalur ini adalah `Derived`, dan UI memberi label "Zona ACPI" bukan "CPU".
+Note: on many laptops the ACPI thermal zone measures the **chassis zone**, not
+the CPU die. It can read 15–25 °C below die temperature. That is why
+`confidence` for this path is `Derived`, and the UI labels it "ACPI zone" rather
+than "CPU".
 
-### Tier 1 — SMART disk
+### Tier 1 — Disk SMART
 
-Port langsung dari `disk-pulse`, yang sudah punya parser terverifikasi unit test:
+Ported directly from `disk-pulse`, which already has fixture-verified parsers:
 
-- NVMe: `IOCTL_STORAGE_QUERY_PROPERTY` dengan `STORAGE_PROTOCOL_SPECIFIC_DATA`,
-  protokol NVMe, log page `0x02` (SMART/Health Information), byte 1–2 =
-  `Composite Temperature` dalam Kelvin.
-- ATA: `SMART_RCV_DRIVE_DATA`, atribut `0xC2` (Temperature) dan `0xBE`
+- NVMe: `IOCTL_STORAGE_QUERY_PROPERTY` with `STORAGE_PROTOCOL_SPECIFIC_DATA`,
+  NVMe protocol, log page `0x02` (SMART/Health Information), bytes 1–2 =
+  `Composite Temperature` in Kelvin.
+- ATA: `SMART_RCV_DRIVE_DATA`, attributes `0xC2` (Temperature) and `0xBE`
   (Airflow Temperature).
-- Fallback: `IOCTL_STORAGE_PREDICT_FAILURE`, lalu storage reliability counters.
+- Fallback: `IOCTL_STORAGE_PREDICT_FAILURE`, then storage reliability counters.
 
-Butuh `GENERIC_READ` pada `\\.\PhysicalDriveN`, yang biasanya butuh admin.
-Tanpa helper: `NeedsElevation`, dan UI menampilkan tombol "Aktifkan lewat helper".
+Requires `GENERIC_READ` on `\\.\PhysicalDriveN`, which usually requires admin.
+Without the helper: `NeedsElevation`, and the UI offers an explicit
+"Start helper (UAC)" button.
+
+Measured on this machine (see [P3-RESULTS.md](P3-RESULTS.md)): opening
+`\\.\PhysicalDrive0` with `GENERIC_READ` fails with `0x0005`
+(`ACCESS_DENIED`) and with access 0 with `0x0001` (`INVALID_FUNCTION`). Disk
+**model** and size are readable without admin through
+`IOCTL_STORAGE_QUERY_PROPERTY`, which is why the disk list is useful even
+unelevated — only the temperature needs the helper.
 
 ### Tier 2 — GPU
 
-| Vendor | Library | Cara | Catatan |
+| Vendor | Library | Method | Note |
 |---|---|---|---|
-| NVIDIA | `nvml.dll` (sudah ada di driver) | `nvml-wrapper`, `nvmlDeviceGetTemperature` | paling andal, tanpa install tambahan |
-| Intel | `igcl.dll` (Intel Graphics Driver) | `libloading` + enumerasi temperature domain | belum diverifikasi di mesin ini (hanya iGPU) |
-| AMD | `amdadlx64.dll` (Adrenalin) | `libloading` + `IADLXTemperature` | belum diverifikasi |
+| NVIDIA | `nvml.dll` (ships with the driver) | `nvml-wrapper`, `nvmlDeviceGetTemperature` | most reliable, no extra install |
+| Intel | `igcl.dll` (Intel Graphics Driver) | `libloading` + temperature domain enumeration | not verified on this machine (iGPU only) |
+| AMD | `amdadlx64.dll` (Adrenalin) | `libloading` + `IADLXTemperature` | not verified |
 
-Semua diakses lewat `libloading` dengan `Option`, bukan link statis. Kalau DLL
-tidak ada, backend melaporkan `NotAvailable` dan tidak ada biaya startup.
+All are loaded through `libloading` behind `Option`, never statically linked. If
+a DLL is absent the backend reports `NotAvailable` and costs nothing at startup.
 
-### Tier 3 — Bridge ke monitor eksternal (opt-in)
+### Tier 3 — Bridge to an external monitor (opt-in)
 
-Untuk pengguna yang butuh suhu CPU dan sudah menjalankan monitor lain, kita
-menyediakan bridge **read-only**:
+For users who need CPU temperature and already run another monitor, we provide a
+**read-only** bridge:
 
-- **LibreHardwareMonitor**: HTTP `GET http://localhost:8085/data.json` (plugin
-  Remote Web Server). Kita parse JSON-nya, petakan nama sensor ke `SensorReading`,
+- **LibreHardwareMonitor**: HTTP `GET http://localhost:8085/data.json` (Remote
+  Web Server plugin). We parse the JSON, map sensor names to `SensorReading`,
   `confidence: ThirdParty`.
-- **HWiNFO**: Shared Memory Support (`Global\HWiNFO_SENS_SM2`), membaca struct
-  yang didokumentasikan HWiNFO untuk pembaca pihak ketiga.
+- **HWiNFO**: Shared Memory Support (`Global\HWiNFO_SENS_SM2`), reading the
+  struct HWiNFO documents for third-party readers.
 
-Aturan bridge:
+Bridge rules:
 
-1. **Nonaktif secara default.** Pengguna harus menyalakannya di Settings dan
-   menyetujui peringatan bahwa data berasal dari pihak ketiga.
-2. **Hanya loopback.** Alamat di-hardcode ke `127.0.0.1`, tidak bisa dikonfigurasi
-   ke host lain.
-3. **Timeout 500 ms, tanpa retry agresif.** Kalau monitor eksternal tidak jalan,
-   bridge diam dan melaporkan `NotAvailable`.
-4. **Tidak pernah menulis** ke monitor tersebut.
+1. **Off by default.** The user must enable it (`--bridge` or
+   `CORE_PULSE_LHM_BRIDGE=1`) and accept that the data is third-party.
+2. **Loopback only.** The address is hard-coded to `127.0.0.1`; it cannot be
+   pointed at another host.
+3. **500 ms timeout, no aggressive retry.** If the external monitor is not
+   running, the bridge stays silent and reports `NotAvailable`.
+4. **Never writes** to that monitor.
 
-### Tier 4 — Driver kernel sendiri: ditolak untuk v1
+### Tier 4 — Our own kernel driver: rejected for v1
 
-Lihat [ADR-0002](ADR/0002-sensor-tiering.md). Ringkasnya: untuk membaca MSR
-(`IA32_PACKAGE_THERM_STATUS` 0x1B1, `IA32_THERM_STATUS` 0x19C) dibutuhkan kode
-ring0. Itu berarti driver yang harus di-sign, diuji di berbagai build Windows,
-dan diperbarui setiap kali Microsoft mengubah aturan. Itu proyek tersendiri,
-bukan fitur dari task manager.
+See [ADR-0002](ADR/0002-sensor-tiering.md). In short: reading MSRs
+(`IA32_PACKAGE_THERM_STATUS` 0x1B1, `IA32_THERM_STATUS` 0x19C) requires ring-0
+code. That means a driver that has to be signed, tested across Windows builds,
+and updated every time Microsoft changes the rules. That is a project in itself,
+not a feature of a task manager.
 
-## 3. Kenapa bukan WinRing0
+## 3. Why not WinRing0
 
-Banyak alat open source (OpenHardwareMonitor, dan versi lama LibreHardwareMonitor)
-membaca MSR lewat `WinRing0.sys`. Pendekatan itu **tidak boleh** dipakai:
+Many open-source tools (OpenHardwareMonitor, older LibreHardwareMonitor) read
+MSRs through `WinRing0.sys`. That approach **must not** be used:
 
-- `WinRing0.sys` punya CVE-2020-14979 (IOCTL yang membocorkan primitif baca/tulis
-  MSR dan port I/O ke proses mana pun).
-- Microsoft memasukkannya ke daftar vulnerable driver blocklist, sehingga Defender
-  memblokirnya.
-- Windows 11 24H2+ dengan HVCI menolak memuatnya.
+- `WinRing0.sys` has CVE-2020-14979 (an IOCTL that leaks MSR read/write and port
+  I/O primitives to any process).
+- Microsoft added it to the vulnerable driver blocklist, so Defender blocks it.
+- Windows 11 24H2+ with HVCI refuses to load it.
 
-Konsekuensinya praktis: aplikasi yang mengemas WinRing0 akan di-flag antivirus
-dan gagal di mesin dengan keamanan default. Ini bukan risiko teoretis, ini
-jalur tercepat menuju aplikasi yang tidak bisa dipasang.
+The practical consequence: an application that bundles WinRing0 gets flagged by
+antivirus and fails on machines with default security settings. This is not a
+theoretical risk; it is the fastest route to an application nobody can install.
 
-Kalau pengguna memilih bridge LHM, mereka menjalankan LHM sendiri dan menerima
-risikonya sendiri. Kita tidak mengemas, tidak mendistribusikan, dan tidak
-memuat driver tersebut.
+If a user chooses the LHM bridge, they run LHM themselves and accept its risks.
+We do not bundle, distribute or load that driver.
 
-## 4. Trait dan siklus hidup
+## 4. Trait and lifecycle
 
 ```rust
 pub trait SensorProvider: Send {
     fn id(&self) -> ProviderId;
-    /// Dicek sekali saat startup dan setiap 30 detik.
+    /// Checked once at startup and every 30 seconds.
     fn probe(&self) -> Availability;
-    /// Tidak boleh blocking lebih dari 100 ms.
+    /// Must not block for more than 100 ms.
     fn read(&mut self, out: &mut Vec<SensorReading>);
-    /// Dipanggil saat probe berubah dari Unavailable → Available.
+    /// Called when probe changes from Unavailable → Available.
     fn init(&mut self) -> Result<(), SensorError> { Ok(()) }
 }
 
 pub enum Availability {
     Available,
     NeedsElevation,
-    NotAvailable(&'static str),   // alasan untuk log
-    Failed(SensorError),
+    NotAvailable(String),   // concrete reason, surfaced to the UI
+    Failed(String),
 }
 ```
 
-Aturan implementasi:
+`NotAvailable` carries an owned `String` rather than `&'static str` because the
+helper forwards provider reasons across the pipe, and those are built at runtime
+(for example, the exact Win32 error when opening a physical drive).
 
-- `probe()` tidak boleh melakukan I/O mahal; hasilnya di-cache.
-- `read()` tidak boleh `panic`. Kalau satu sensor gagal, kembalikan yang lain.
-- Provider yang `NotAvailable` tidak dipanggil `read()` sama sekali (nol biaya).
-- Setiap provider punya budget waktu; total satu siklus sensor < 100 ms, kalau
-  lewat, provider tersebut di-skip pada siklus berikutnya dan dicatat.
+Implementation rules:
 
-## 5. Status yang ditampilkan UI
+- `probe()` must not perform expensive I/O; its result is cached.
+- `read()` must not `panic`. If one sensor fails, return the others.
+- A provider that is `NotAvailable` is never called for `read()` (zero cost).
+- Each provider has a time budget; a full sensor cycle stays under 100 ms, and a
+  provider that overruns is skipped on the next cycle and logged.
 
-Tidak ada angka palsu, tidak ada `0 °C`, tidak ada suhu "kira-kira".
+The elevated helper implements the same trait and is merged on the client side:
 
-| Kondisi | Tampilan |
+```
+local providers ─┐
+                 ├─> merge_into(SensorReport)
+helper (pipe) ───┘
+```
+
+Merge rules, enforced by unit tests:
+
+1. A local reading wins when the `id` collides — local data is closer to the
+   source.
+2. The `smart` status comes from the helper when the helper answers, because it
+   is the process that actually performs the IOCTL.
+3. A `helper` status is always added, carrying `Available` (elevated),
+   `NeedsElevation` (running but not elevated) or a failure reason.
+4. Values outside the physical range are dropped, from either source.
+
+## 5. Status shown in the UI
+
+No fabricated numbers, no `0 °C`, no "approximate" temperatures.
+
+| Condition | Display |
 |---|---|
-| Ada sensor, `Direct` | `62 °C` + tooltip sumber ("NVMe SMART") |
-| Ada sensor, `Derived` | `48 °C` + ikon kecil + tooltip ("Zona ACPI, biasanya di bawah suhu die") |
-| Ada sensor, `ThirdParty` | `71 °C` + tooltip ("LibreHardwareMonitor, pihak ketiga") |
-| `NeedsElevation` | `—` + "Butuh helper" + tombol "Cara mengaktifkan" |
-| `NotAvailable` | `—` + "Tidak tersedia di perangkat ini" + tombol "Kenapa?" |
-| Provider gagal | `—` + "Gagal membaca" + link ke log |
+| A sensor exists, `Direct` | `62 °C` + source tooltip ("NVMe SMART") |
+| A sensor exists, `Derived` | `48 °C` + small marker + tooltip ("ACPI zone, usually below die temperature") |
+| A sensor exists, `ThirdParty` | `71 °C` + tooltip ("LibreHardwareMonitor, third party") |
+| `NeedsElevation` | `—` + "Helper not running — disk SMART needs elevation" + "Start helper (UAC)" |
+| `NotAvailable` | `—` + the concrete reason returned by the provider |
+| Provider failed | `—` + "Helper error — <error>" |
 
-Panel "Kenapa?" membuka dialog yang menjelaskan kondisi mesin spesifik — inilah
-tempat `core-pulse-cli doctor` berguna, karena hasilnya bisa ditempel ke bug report.
+When the helper is not running, the Sensors tab shows the reason together with
+two explicit buttons: **Start helper (UAC)** and **Install service (UAC)**. No
+UAC prompt ever appears without a click. `core-pulse-cli doctor` reports the same
+state from the terminal, so the diagnosis is reproducible in a bug report.
 
-## 6. Ambang alert
+## 6. Alert thresholds
 
-| Metrik | Warning | Critical | Durasi sebelum notifikasi |
+The engine lives in `core-pulse-core::alerts` and runs on the sampler thread.
+Thresholds are deliberately conservative: an alert should mean "look at this",
+not "something twitched".
+
+| Metric | Warning | Critical | Duration before notification |
 |---|---|---|---|
-| Suhu CPU | 85 °C | 95 °C | 15 detik berturut |
-| Suhu GPU | 83 °C | 90 °C | 15 detik |
-| Suhu disk (SMART) | 55 °C | 65 °C | 30 detik |
-| SMART health | atribut kritis berubah | prediksi gagal | segera |
-| Tekanan memori | 75 | 90 | 60 detik |
+| CPU total | 90% | 97% | 5 seconds sustained |
+| Memory in use | 90% | 97% | 5 seconds sustained |
+| Disk temperature (SMART) | 55 °C | 60 °C | 10 seconds sustained |
+| Other temperatures (CPU/GPU/ACPI) | 80 °C | 85 °C | 10 seconds sustained |
+| Free disk space | < 5% | < 2% | 60 seconds sustained (volumes ≥ 1 GB) |
 
-Dedup + cooldown 10 menit per (metrik, subjek), supaya tidak jadi spam. Desain
-engine-nya diambil dari `disk-pulse` yang sudah teruji.
+Deduplication and a **5-minute cooldown** per key prevent spam. An active alert
+is never re-notified; clearing emits exactly one `Cleared` event. Missing sensor
+data can never raise an alert, because a metric with no reading produces no
+candidate at all.
 
-## 7. Yang perlu diverifikasi di mesin nyata
+## 7. What still needs verification on real hardware
 
-Jujur soal ini: beberapa hal belum bisa diuji di mesin pengembangan.
+Honest about this: several things cannot be tested on the development machine.
 
-| Item | Status | Cara verifikasi |
+| Item | Status | How to verify |
 |---|---|---|
-| SMART NVMe | **parser teruji fixture**, pembacaan butuh admin | fixture 318 K → 44,85 °C |
-| SMART ATA | **parser teruji fixture**, pembacaan butuh admin | fixture atribut 0xC2 → 41 °C |
-| NVML | **belum teruji** (tidak ada NVIDIA) | mesin dengan GTX/RTX |
-| IGCL Intel | **belum teruji**, DLL tidak ada di mesin ini | mesin dengan Intel Arc |
-| ADLX AMD | **belum teruji** | mesin dengan Radeon |
-| LHM bridge | **belum teruji** (LHM tidak berjalan) | install LHM, aktifkan web server, port 8085 |
-| ACPI thermal zone | **terbukti kosong di sini** (0 instance) | mesin lain (banyak laptop punya) |
+| SMART NVMe | **parser verified with fixtures**, reading needs admin | fixture 318 K → 44.85 °C |
+| SMART ATA | **parser verified with fixtures**, reading needs admin | fixture attribute 0xC2 → 41 °C |
+| NVML | **not tested** (no NVIDIA GPU) | a machine with a GTX/RTX card |
+| IGCL Intel | **not tested**, DLL absent here | a machine with Intel Arc |
+| ADLX AMD | **not tested** | a machine with a Radeon card |
+| LHM bridge | **not tested** (LHM not running) | install LHM, enable its web server, port 8085 |
+| ACPI thermal zone | **proven empty here** (0 instances) | another machine (many laptops have one) |
 
-Status ini juga dilaporkan runtime oleh `core-pulse-cli sensors`, jadi pengguna
-tidak perlu percaya dokumentasi saja.
+This status is also reported at runtime by `core-pulse-cli sensors`, so the user
+does not have to trust the documentation alone.
 
-Sampai item di atas terverifikasi, dokumentasi pengguna harus menyebutnya sebagai
-"best effort", bukan "didukung".
+Until the items above are verified, user-facing documentation must call them
+"best effort", not "supported".

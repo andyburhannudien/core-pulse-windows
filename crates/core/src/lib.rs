@@ -5,11 +5,15 @@
 
 #![deny(unsafe_op_in_unsafe_fn)]
 
+pub mod alerts;
 pub mod collector;
 pub mod model;
 pub mod sampler;
 pub mod sys;
 
+pub use alerts::{
+    Alert, AlertChange, AlertEngine, AlertEvent, AlertKind, AlertSeverity, AlertState, AlertStore,
+};
 pub use collector::{Collector, SlowData, SlowStore, spawn_slow_refresher};
 pub use model::*;
 

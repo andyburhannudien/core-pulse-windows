@@ -1,234 +1,230 @@
-# Spesifikasi UI
+# UI specification
 
-UI memakai `egui/eframe` 0.37 dengan `egui_extras` (tabel) dan `egui_plot`
-(grafik). Dokumen ini mendefinisikan apa yang dilihat pengguna, supaya
-implementasi tidak mengarang sendiri.
+The UI uses `egui`/`eframe` 0.37 with `egui_extras` (tables). This document
+defines what the user sees so the implementation does not invent its own rules.
 
-## 1. Prinsip
+## 1. Principles
 
-1. **Padat, bukan lapang.** Ini alat diagnostik; informasi per piksel lebih
-   berharga daripada whitespace.
-2. **Jujur.** Nilai yang tidak diketahui tampil sebagai `—` dengan alasan, bukan
-   `0`.
-3. **Cepat.** Semua angka bisa disortir dan dicari tanpa jeda terasa.
-4. **Tidak mengejutkan.** Aksi destruktif selalu dikonfirmasi dan selalu
-   menyebut nama + PID target.
+1. **Dense, not airy.** This is a diagnostic tool; information per pixel is
+   worth more than whitespace.
+2. **Honest.** An unknown value renders as `—` with a reason, never as `0`.
+3. **Fast.** Every number is sortable and searchable with no perceptible delay.
+4. **Unsurprising.** Destructive actions are always confirmed and always name
+   the target plus its PID.
+5. **Technical, not decorative.** Monospaced numerals, hairline borders, one
+   accent colour. No gradients-for-their-own-sake, no rounded-everything.
 
-## 2. Kerangka window
+## 2. Window frame
 
 ```
-+--------------------------------------------------------------------------+
-| [Proses] [Kinerja] [Sensor] [Riwayat] [Mulai] [Layanan] [Pengguna]        |  nav bar
-+--------------------------------------------------------------------------+
-| cari: [_______________]   [x] tampilkan proses sistem     400 proses      |  toolbar
-+--------------------------------------------------------------------------+
-| Nama            PID    CPU   Memori   Disk   Jaringan   GPU   Status      |  header
-| chrome.exe     4820   4.2%   512 MB    0 B/s    12 KB/s  1.8%  Berjalan   |
-|  ...                                                                     |
-|                                                                          |
-+--------------------------------------------------------------------------+
-| CPU 12%  Mem 41%  Disk 3%  Net 0.4 MB/s  GPU 2%  CPU 62C*  Disk 38C       |  status bar
-+--------------------------------------------------------------------------+
++----------+---------------------------------------------------------------+
+|  ◢ core- | Processes                          Search [_________]  21:04:55 |
+|    pulse | Running processes, CPU, memory, actions   211 processes  1.0 s |
++----------+---------------------------------------------------------------+
+| ▤ Processes 212 | PID   NAME        PATH            CPU   MEM  I/O ...   |
+| ▥ Performance   | 12552 Zed.exe     C:\...\Zed.exe  3.4%  141 MB  ...    |
+| ◉ Sensors       |  1768 dwm.exe     C:\...\dwm.exe  1.3%  112 MB  ...    |
+| ▲ Alerts        |                                                       |
+| ⚙ Services  714 |                                                       |
+| ↗ Startup     7 |                                                       |
+| ◍ Users       2 |                                                       |
+|                 |                                                       |
+| ● All thresholds nominal                                               |
+| 6 cores · 8 GB RAM                                                     |
++----------+---------------------------------------------------------------+
+| CPU 24%  RAM 64%  DISK 31%  NET 1.8 KB/s  TEMP —   4 degraded sources    |
++-------------------------------------------------------------------------+
 ```
 
-`*` pada suhu menandakan `confidence != Direct` (lihat [SENSORS.md](SENSORS.md)).
-Kalau tidak ada sensor sama sekali, bagian suhu di status bar menampilkan
-`Suhu: tidak tersedia` dan bisa diklik untuk membuka penjelasan.
+- Default size 1360×860, minimum 1000×620, and the window opens **maximised**
+  (`--windowed` keeps it at the default size).
+- The navigation rail is exactly 196 px and not resizable; the content area
+  absorbs all remaining width.
 
-Ukuran default: 1200 × 780, minimum 900 × 560. Posisi dan ukuran window disimpan
-per pengguna.
+## 3. Navigation rail
 
-## 3. Tab Proses
-
-### Kolom (default)
-
-| Kolom | Lebar | Isi | Sortable |
-|---|---|---|---|
-| Nama | fleksibel (min 200) | nama + ikon 16 px | ya |
-| PID | 70 | — | ya |
-| Status | 100 | Berjalan / Ditangguhkan / Tidak merespons | ya |
-| CPU | 80 | % dari total sistem | ya |
-| Memori | 100 | private working set | ya |
-| Disk | 100 | byte/detik | ya |
-| Jaringan | 110 | byte/detik (butuh ETW) | ya |
-| GPU | 70 | % (butuh PDH GPU) | ya |
-| Pengguna | 140 | `DOMAIN\user` | ya |
-| Integritas | 90 | Sedang / Tinggi / Sistem | ya |
-| Tertanda tangan | 90 | ikon ✓ / ✗ / ? | ya |
-
-Kolom bisa disembunyikan lewat menu klik kanan header; pilihan disimpan.
-Kolom yang sumbernya tidak tersedia (mis. Jaringan tanpa admin) **disembunyikan
-otomatis** pada run pertama, dan bisa dimunculkan manual dengan status "butuh
-hak administrator" di header-nya.
-
-### Perilaku
-
-- Virtualized: hanya baris yang terlihat yang dirender (`TableBuilder::body.rows`).
-- Sorting: klik header untuk toggle asc/desc/none. Default CPU desc.
-- Search: substring case-insensitive pada nama, path, dan PID. Debounce 120 ms.
-- Tree: toggle "Tampilkan hierarki" mengelompokkan proses anak di bawah induk;
-  induk bisa di-collapse. Agregat CPU/RAM induk = proses itu sendiri + anak yang
-  ter-collapse (diberi penanda `+`).
-- Selection: satu atau banyak baris (Ctrl/Shift). Aksi berlaku ke semua yang dipilih.
-- Klik kanan: menu kontekstual (lihat §7).
-- Double click: buka dialog properti proses.
-- Proses yang baru muncul diberi highlight halus selama 3 detik; yang hilang
-  langsung dihapus (tanpa animasi yang mengganggu sorting).
-
-### Keadaan kosong dan terdegradasi
-
-| Keadaan | Tampilan |
+| Element | Behaviour |
 |---|---|
-| Snapshot pertama belum ada | spinner + "Membaca sistem…" (maks 2 detik) |
-| Enumerasi proses gagal | panel error dengan tombol "Coba lagi" + kode error |
-| Kolom GPU kosong (VM) | kolom disembunyikan, catatan di tooltip |
-| Proses sistem disembunyikan | baris footer "12 proses sistem disembunyikan" |
+| Brand | Pulse glyph plus wordmark; static |
+| Items | Icon, label, and a right-aligned live counter where one makes sense |
+| Selection | Tinted background, 2 px accent bar on the left edge, white label |
+| Hover | `#252932` fill; no layout shift |
+| Footer | Computer name and account type, core/RAM summary, alert state |
 
-## 4. Tab Kinerja
+Counters are hidden when they would be zero (Alerts) or meaningless
+(Performance, Sensors).
 
-Grid dua kolom berisi kartu:
+## 4. Command bar
 
-| Kartu | Isi |
+Left: page title and a one-line description of the tab.
+
+Centre, per tab:
+
+| Tab | Controls |
 |---|---|
-| CPU | total %, 6 grafik per-core mini, frekuensi, queue, context switch |
-| Memori | donut komposisi (in use / modified / standby / free) + commit |
-| Disk | per disk: busy %, throughput, response time, queue |
-| Jaringan | per adapter: rx/tx, link speed, status |
-| GPU | per adapter: utilization, memori khusus/bersama, suhu |
-| Suhu | kartu ringkas semua sensor suhu + sparkline 60 detik |
+| Processes | Search (name or PID), Clear, "System processes", "Signatures", "Details" |
+| Services | Filter by service or display name, Clear |
+| Sensors | "Only above 45 °C" |
+| Others | none |
 
-Grafik: 60 titik × 1 Hz, garis + area semi-transparan. Skala Y auto dengan
-minimum 100% untuk CPU. Saat window tidak fokus, redraw turun ke 1 fps.
+Right: the sample interval (`interval 999 ms`), the process count, and the
+wall-clock time from the latest snapshot.
 
-## 5. Tab Sensor
+## 5. Status strip
 
-Tampilan pohon ala LibreHardwareMonitor, tapi hanya untuk sumber yang benar-benar
-ada:
+Always visible, 34 px tall. Left to right:
 
-```
-CPU
-  └─ (tidak tersedia — firmware tidak mengekspos thermal zone)   [Kenapa?]
-Disk
-  ├─ ST1000LM049  38 °C   SMART
-  └─ ST500LT012   36 °C   SMART
-GPU
-  └─ Intel UHD 630  52 °C   IGCL (pihak ketiga)
-```
+`CPU <n>%` · `RAM <n>%` · `DISK <n>%` · `NET <rate>` · `TEMP <n> °C | —`
 
-Setiap baris menampilkan nilai sekarang, min, max, rata-rata sesi, dan sumber.
-Tombol "Rekam CSV" untuk ekspor. Baris yang tidak tersedia tetap ditampilkan
-(dengan alasan) — menyembunyikannya membuat pengguna bingung kenapa tidak ada
-suhu CPU.
+Right side: OS name, build, uptime, and a degraded-source count with a tooltip
+listing each reason. Action feedback temporarily replaces the left side for six
+seconds with a green `✓` or red `✕`.
 
-## 6. Tab lain
+When no temperature source exists the strip shows `TEMP —` and a tooltip
+explaining that the firmware exposes no ACPI thermal zone and that disk SMART
+needs the elevated helper.
 
-- **Riwayat**: grafik 24 jam / 7 hari / 30 hari dari SQLite; tabel "pemakan CPU
-  teratas per jam"; daftar alert.
-- **Mulai (Startup)**: entri Registry Run + folder Startup + scheduled task,
-  dengan status aktif/nonaktif dan dampak (estimasi dari riwayat).
-- **Layanan**: daftar service, status, start type, tombol start/stop (butuh
-  elevasi; kalau tidak ada, tombol disabled dengan tooltip).
-- **Pengguna**: sesi aktif, proses per sesi, konsumsi agregat.
+## 6. Processes tab
 
-## 7. Menu kontekstual proses
+### Columns
 
-| Item | Butuh elevasi | Konfirmasi |
+| Column | Width | Content |
 |---|---|---|
-| Akhiri tugas | kadang | ya (nama + PID) |
-| Akhiri pohon proses | kadang | ya (jumlah proses anak) |
-| Tangguhkan / Lanjutkan | ya | tidak |
-| Prioritas (submenu) | ya untuk naik | tidak |
-| Afinitas CPU | ya | tidak |
-| Mode efisiensi | tidak | tidak |
-| Buka lokasi file | tidak | tidak |
-| Properti | tidak | tidak |
-| Salin (nama / PID / path / command line) | tidak | tidak |
+| PID | 56 | Monospaced |
+| Name | 190 | Status dot + name; amber when elevated |
+| Executable path | flexible (≥ 120) | Middle-truncated, monospaced; `—` when unreadable |
+| CPU | 76 | Percentage plus a 26 px inline bar |
+| Memory | 92 | Digits and unit rendered separately for alignment |
+| I/O total | 84 | Read + written bytes accumulated |
+| GPU | 76 | `—` when not measured, never `0%` |
+| Threads | 52 | |
+| Handles | 44 | |
+| Session | 46 | Terminal Services session id |
+| Signature | 98 | Only while "Signatures" is enabled |
 
-Item yang butuh elevasi dan tidak tersedia: disabled + tooltip "Butuh hak
-administrator". Bukan hilang, supaya pengguna tahu fitur itu ada.
+Sorting: PID, Name, CPU, Memory. Default is CPU descending. Clicking the active
+column flips direction; a new column starts at its natural extreme.
 
-## 8. Keyboard
+### Behaviour
 
-| Shortcut | Aksi |
+- Virtualised: only visible rows are painted.
+- Single click selects; double click opens the detail panel; right click opens
+  the context menu on any cell.
+- The status dot encodes running (green), suspended (amber), not responding
+  (red) and zombie (dim). Hovering a non-running dot explains it.
+- Elevated processes are drawn amber; the detail panel states elevation
+  explicitly.
+
+### Detail panel
+
+`Panel::bottom`, resizable, default 250 px. Two columns of key/value rows:
+
+| Left | Right |
 |---|---|
-| `Ctrl+F` | fokus ke kolom pencarian |
-| `Ctrl+C` | salin baris terpilih (TSV) |
-| `Delete` | akhiri tugas (dengan konfirmasi) |
-| `F5` | paksa refresh snapshot |
-| `Ctrl+1..7` | pindah tab |
-| `Ctrl+,` | pengaturan |
-| `Ctrl+Shift+E` | buka log folder |
-| `Esc` | tutup dialog / bersihkan selection |
-| `Ctrl+Q` | keluar (atau ke tray kalau "close to tray" aktif) |
+| Path, command line, user, integrity, elevated, signature | CPU time, memory (private/working set/shared), I/O total, threads/handles, session, running for, started at, efficiency mode |
 
-## 9. Tema dan tipografi
+Actions: "Open file location", "Copy command line", "Copy PID".
 
-Token warna (dipakai konsisten, tidak ada hardcode di view):
+`…` means "not read yet"; `—` means "the source refused or is absent". The
+distinction matters: they suggest different user actions.
 
-| Token | Gelap | Terang |
-|---|---|---|
-| `bg_base` | `#1a1a1c` | `#f7f7f8` |
-| `bg_panel` | `#232326` | `#ffffff` |
-| `bg_row_alt` | `#1f1f22` | `#f2f2f4` |
-| `border` | `#33333a` | `#dcdce0` |
-| `text_primary` | `#e8e8ea` | `#1a1a1c` |
-| `text_muted` | `#9a9aa2` | `#6b6b72` |
-| `accent` | `#4a9eff` | `#0a6cd8` |
-| `warn` | `#e0a030` | `#a86a00` |
-| `crit` | `#e05a5a` | `#c03030` |
-| `ok` | `#4ac07a` | `#1a7a45` |
+## 7. Performance tab
 
-Font: Segoe UI Variable (sistem) dengan fallback Segoe UI; ukuran dasar 13 px,
-tabel 12,5 px, angka memakai tabular figures supaya kolom tidak bergoyang.
-Ikuti tema sistem secara default, dengan override manual.
+Six KPI tiles: CPU, Memory, Disk, Network, GPU, Max temp. Each carries a
+segmented meter, a primary number, and a one-line context. Max temp renders `—`
+and "no sensor source" when no sensor exists.
 
-## 10. Aksesibilitas dan DPI
+Below: two charts per row (Processor + Memory pressure, Disk activity + Network
+throughput); each is a 60-point, 1 Hz sparkline with a gradient fill and a
+25/50/75% grid.
 
-- Per-monitor DPI aware v2; layout diuji di 100/125/150/200%.
-- Semua aksi bisa dicapai lewat keyboard.
-- Kontras teks minimal 4.5:1 pada kedua tema.
-- Status tidak hanya dibedakan warna: ikon/tanda pada alert dan status proses.
-- Tooltip muncul setelah 400 ms, tidak menutupi baris yang sedang dibaca.
+Then, in two columns:
 
-## 12. Catatan implementasi (egui 0.37)
+- **Logical processors** — per-core bars with a value column, plus physical
+  cores, logical cores, base clock, total threads and process count.
+- **Volumes** — mount point, usage bar (green < 85%, amber < 95%, red above),
+  free space; hover shows label, filesystem and exact usage.
 
-Beberapa detail berubah dibanding versi egui sebelumnya. Ini catatan untuk
-siapa pun yang menyentuh `crates/ui`:
+Then **Memory composition**, a two-column key/value grid (in use, available,
+standby, modified, free, cached, commit, paged/nonpaged pool, pressure).
 
-- `eframe::App` sekarang punya `fn ui(&mut self, ui: &mut egui::Ui, frame: &mut Frame)`.
-  Tidak ada lagi `fn update(&mut self, ctx, frame)`; panel dibuat dari `Ui`, bukan
-  dari `Context`.
-- Panel atas/bawah: `egui::Panel::top(id)` / `egui::Panel::bottom(id)`.
-  `TopBottomPanel` dan `SidePanel` sudah tidak ada.
-- `egui::CentralPanel::default().show(ui, ...)` menerima `&mut Ui`.
-- Tabel memakai `.id_salt("process_table")` supaya state kolom tidak bertabrakan
-  dengan tabel lain di masa depan.
-- Tabel diset `resizable(false)` dan kolom nama `clip(true)` — dengan
-  `resizable(true)` kolom bisa melebar melewati lebar window dan header
-  terpotong.
-- Sparkline digambar manual (`spark_points` + `egui::Shape::line`), bukan
-  `egui_plot`. Untuk 60 titik hasilnya identik dan tidak menambah dependensi.
-- `--tab performance` (argumen CLI) membuka langsung di tab Kinerja, dipakai untuk
-  screenshot otomatis dan uji manual.
-- Renderer: fitur `glow`. Lihat [COMPATIBILITY §5](COMPATIBILITY.md#5-catatan-build-dan-renderer).
+Then **Disks** and **GPUs**: per-device dot, model, media type, busy meter,
+read/write rates, queue depth and average response; GPU adds utilization meter
+and memory split.
 
-Status implementasi per bagian spesifikasi ini:
+Finally **Degraded sources**, one line per reason.
 
-| Bagian | Status |
+## 8. Sensors tab
+
+Three KPI tiles: temperature sensor count, hottest reading, helper state
+(`ACTIVE` / `NOT RUNNING` / `ERROR` / `UNKNOWN`).
+
+Then two columns:
+
+- **Temperature** — one row per sensor: dot, label, value right-aligned in
+  monospace, confidence marker (`≈` derived, `◇` third party), a 110 °C-scaled
+  meter, and a source/min/max/avg line. Empty state explains *why* nothing is
+  available.
+- **Provider status** — one row per provider with state and reason, then the
+  helper block: status line plus "Start helper (UAC)" and
+  "Install service (UAC)". There is no automatic elevation.
+
+Then two cards: "Why CPU temperature is often missing" and "Other sensors"
+(fan, voltage, power, wear) with polling interval and reading counts.
+
+## 9. Alerts tab
+
+When nothing is active: a calm green card stating that thresholds are evaluated
+every second and listing them. When something is active: one card per alert
+with severity badge, title, detail, value and threshold. Below, a **Recent
+events** card with up to 20 raised/cleared entries and their timestamps.
+
+An alert banner appears above any tab body whenever at least one alert is
+active. It shows the highest-severity alert, the count of others, and a
+"View alerts" button.
+
+## 10. Services, Startup, Users
+
+All three are virtualised tables with a one-line summary above and an
+explanatory note below when a limitation applies.
+
+- Services: name, display name, state (dot + label), startup type, PID.
+- Startup: entry, source, target present/missing, 32-bit flag; hover shows the
+  command line.
+- Users: session id, user (`—` when unreadable), state, process count, CPU,
+  memory.
+
+## 11. Interaction summary
+
+| Input | Result |
 |---|---|
-| §2 kerangka window (nav, toolbar, status bar) | **Selesai** |
-| §3 tab Proses (kolom, sort, search, virtualized) | **Selesai** untuk Nama/PID/CPU/Memori/GPU/Thread/Handle |
-| §4 tab Kinerja (CPU, memori, disk, GPU, jaringan, grafik) | **Selesai** |
-| §5 tab Sensor | **Selesai** (status per provider + penjelasan; angka menunggu helper P4) |
-| §6 tab lain (Layanan, Mulai, Pengguna) | **Selesai** |
-| §7 menu kontekstual | **Selesai** (affinity & properti file belum) |
-| §8 keyboard | Belum (P5) |
-| §9 tema | Sebagian — tema gelap tetap; token belum dipusatkan |
-| §10 aksesibilitas | Belum diuji |
-| §11 tray | Belum (P4) |
+| `Ctrl+F` | Focus process search |
+| `Ctrl+1`…`Ctrl+7` | Switch tabs |
+| `Esc` | Close detail panel or confirmation dialog |
+| Double click row | Open detail panel |
+| Right click row | Context menu |
 
-## 11. Tray
+## 12. Theme
 
-Menu: Tampilkan, Sensor ringkas (submenu), Mode senyap (matikan notifikasi),
-Mulai saat login (checkbox), Keluar. Klik ganda membuka window. Ikon berubah
-warna kalau ada alert aktif — satu-satunya indikasi visual di luar window.
+| Token | Value |
+|---|---|
+| Background | `#111317` |
+| Panel | `#17191F` |
+| Elevated surface | `#1D2027` |
+| Hover | `#252932` |
+| Border | `#2B3039`, strong `#3A414D` |
+| Text | `#E4E8EF`, dim `#9AA3B2`, faint `#6C7585` |
+| Accent | `#4C9EFF` |
+| Success / warning / danger | `#4FC386` / `#E3A83E` / `#E5605A` |
+| Chart series | CPU blue, RAM green, disk amber, network cyan, GPU purple |
+
+Typography: Segoe UI for prose (13 px body, 17 px headings), Consolas for every
+numeral and identifier (12 px). Body text never below 10 px; table headers are
+9.5 px uppercase with 1.1 px letter spacing.
+
+## 13. Accessibility
+
+- Colour is never the only signal: status always has a text label or a glyph.
+- All numbers use a monospaced face so digits do not jitter as values change.
+- Hover tooltips explain every abbreviated state.
+- Contrast of body text against the panel background exceeds 7:1.

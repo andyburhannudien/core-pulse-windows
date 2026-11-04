@@ -26,3 +26,11 @@ eframe = { version = "0.37", default-features = false, features = [
 ] }
 egui_extras = "0.37"
 egui_plot = "0.38"
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.62", features = [
+    "Win32_Foundation",
+    "Win32_System_SystemInformation",
+    "Win32_UI_Shell",
+    "Win32_UI_WindowsAndMessaging",
+] }

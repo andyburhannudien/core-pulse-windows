@@ -33,7 +33,7 @@ impl NetCollector {
             degraded.push(Degradation {
                 area: crate::model::Area::Net,
                 reason: DegradeReason::ApiFailed,
-                detail: format!("GetIfTable2 gagal: {rc:?}"),
+                detail: format!("GetIfTable2 failed: {rc:?}"),
             });
             return (Vec::new(), degraded);
         }
@@ -117,7 +117,7 @@ impl NetCollector {
             degraded.push(Degradation {
                 area: crate::model::Area::Net,
                 reason: DegradeReason::NotAvailable,
-                detail: "tidak ada adapter jaringan non-loopback".into(),
+                detail: "no non-loopback network adapter".into(),
             });
         }
 

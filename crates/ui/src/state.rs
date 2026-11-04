@@ -1,5 +1,6 @@
-//! State UI: snapshot terbaru, filter, sort, ring buffer grafik.
+//! UI state: latest snapshot, filtering, sorting, chart ring buffers.
 
+use core_pulse_core::alerts::AlertState;
 use core_pulse_core::model::{ProcessRow, Snapshot};
 use std::sync::Arc;
 
@@ -8,6 +9,7 @@ pub enum Tab {
     Processes,
     Performance,
     Sensors,
+    Alerts,
     Services,
     Startup,
     Users,
@@ -16,20 +18,48 @@ pub enum Tab {
 impl Tab {
     pub fn label(self) -> &'static str {
         match self {
-            Self::Processes => "Proses",
-            Self::Performance => "Kinerja",
-            Self::Sensors => "Sensor",
-            Self::Services => "Layanan",
-            Self::Startup => "Mulai",
-            Self::Users => "Pengguna",
+            Self::Processes => "Processes",
+            Self::Performance => "Performance",
+            Self::Sensors => "Sensors",
+            Self::Alerts => "Alerts",
+            Self::Services => "Services",
+            Self::Startup => "Startup",
+            Self::Users => "Users",
         }
     }
 
-    pub fn all() -> [Self; 6] {
+    /// Short glyph shown in the navigation rail. Text-only fallbacks are used
+    /// because a missing glyph is worse than no glyph.
+    pub fn icon(self) -> &'static str {
+        match self {
+            Self::Processes => "▤",
+            Self::Performance => "▥",
+            Self::Sensors => "◉",
+            Self::Alerts => "▲",
+            Self::Services => "⚙",
+            Self::Startup => "↗",
+            Self::Users => "◍",
+        }
+    }
+
+    pub fn hint(self) -> &'static str {
+        match self {
+            Self::Processes => "Running processes, CPU, memory, actions",
+            Self::Performance => "System-wide throughput and history",
+            Self::Sensors => "Hardware temperatures and provider status",
+            Self::Alerts => "Sustained threshold warnings",
+            Self::Services => "Windows services and their state",
+            Self::Startup => "Logon entries and their targets",
+            Self::Users => "Terminal Services sessions",
+        }
+    }
+
+    pub fn all() -> [Self; 7] {
         [
             Self::Processes,
             Self::Performance,
             Self::Sensors,
+            Self::Alerts,
             Self::Services,
             Self::Startup,
             Self::Users,
@@ -37,14 +67,14 @@ impl Tab {
     }
 }
 
-/// Aksi yang menunggu konfirmasi pengguna.
+/// An action waiting for explicit user confirmation.
 #[derive(Debug, Clone)]
 pub struct PendingAction {
     pub kind: PendingKind,
     pub pid: u32,
     pub name: String,
     pub start_time_unix_ms: u64,
-    /// Jumlah proses turunan, untuk aksi yang mengenai pohon proses.
+    /// Number of descendant processes, for actions that touch a tree.
     pub descendants: u32,
 }
 
@@ -61,17 +91,17 @@ pub enum PendingKind {
 impl PendingKind {
     pub fn title(self) -> &'static str {
         match self {
-            Self::Terminate => "Akhiri tugas?",
-            Self::TerminateTree => "Akhiri pohon proses?",
-            Self::Suspend => "Tangguhkan proses?",
-            Self::Resume => "Lanjutkan proses?",
-            Self::SetPriority(_) => "Ubah prioritas?",
-            Self::SetEfficiency(true) => "Aktifkan mode efisiensi?",
-            Self::SetEfficiency(false) => "Matikan mode efisiensi?",
+            Self::Terminate => "End task?",
+            Self::TerminateTree => "End process tree?",
+            Self::Suspend => "Suspend process?",
+            Self::Resume => "Resume process?",
+            Self::SetPriority(_) => "Change priority?",
+            Self::SetEfficiency(true) => "Enable efficiency mode?",
+            Self::SetEfficiency(false) => "Disable efficiency mode?",
         }
     }
 
-    /// Aksi destruktif butuh konfirmasi eksplisit dan tombol merah.
+    /// Destructive actions require an explicit confirmation and a red button.
     pub fn is_destructive(self) -> bool {
         matches!(
             self,
@@ -80,7 +110,7 @@ impl PendingKind {
     }
 }
 
-/// Pesan hasil aksi terakhir, ditampilkan di status bar selama beberapa detik.
+/// Result of the last action, shown in the status bar for a few seconds.
 #[derive(Debug, Clone)]
 pub struct ActionFeedback {
     pub text: String,
@@ -102,13 +132,14 @@ impl SortKey {
     }
 }
 
-/// Riwayat grafik: 60 titik, 1 Hz.
+/// Chart history: 60 points at 1 Hz.
 pub struct History {
     pub cpu: Vec<f32>,
     pub mem: Vec<f32>,
     pub gpu: Vec<f32>,
     pub disk: Vec<f32>,
-    /// Suhu rata-rata semua sensor suhu. Kosong kalau tidak ada sensor.
+    pub net: Vec<f32>,
+    /// Average of all temperature sensors. Empty when no sensor exists.
     pub temp: Vec<f32>,
     pub has_temp: bool,
 }
@@ -120,6 +151,7 @@ impl Default for History {
             mem: Vec::with_capacity(60),
             gpu: Vec::with_capacity(60),
             disk: Vec::with_capacity(60),
+            net: Vec::with_capacity(60),
             temp: Vec::with_capacity(60),
             has_temp: false,
         }
@@ -127,12 +159,21 @@ impl Default for History {
 }
 
 impl History {
-    pub fn push(&mut self, cpu: f32, mem_percent: f32, gpu: f32, disk: f32, temp: Option<f32>) {
+    pub fn push(
+        &mut self,
+        cpu: f32,
+        mem_percent: f32,
+        gpu: f32,
+        disk: f32,
+        net: f32,
+        temp: Option<f32>,
+    ) {
         if self.cpu.len() >= 60 {
             self.cpu.remove(0);
             self.mem.remove(0);
             self.gpu.remove(0);
             self.disk.remove(0);
+            self.net.remove(0);
             if !self.temp.is_empty() {
                 self.temp.remove(0);
             }
@@ -141,14 +182,15 @@ impl History {
         self.mem.push(mem_percent);
         self.gpu.push(gpu);
         self.disk.push(disk);
+        self.net.push(net);
         if let Some(t) = temp {
             self.has_temp = true;
             self.temp.push(t);
         }
     }
 
-    /// Suhu rata-rata terakhir, kalau ada. Dipakai test; UI membaca `temp`
-    /// langsung karena butuh seluruh seri untuk grafik.
+    /// Last average temperature, when present. Used by tests; the UI reads
+    /// `temp` directly because it needs the whole series.
     #[cfg(test)]
     pub fn last_temp(&self) -> Option<f32> {
         self.temp.last().copied()
@@ -164,15 +206,23 @@ pub struct AppState {
     pub history: History,
     pub last_seq: u64,
     pub selected: Option<u32>,
-    /// Detail proses yang sedang dibuka di panel bawah.
+    /// Process whose detail panel is open.
     pub detail_pid: Option<u32>,
-    /// Aksi yang menunggu konfirmasi.
+    /// Action waiting for confirmation.
     pub pending: Option<PendingAction>,
     pub feedback: Option<ActionFeedback>,
-    /// Nyalakan verifikasi tanda tangan (mahal) hanya saat kolomnya terlihat.
+    /// Signature verification is expensive; only enable it while visible.
     pub show_signatures: bool,
-    /// Snapshot yang sedang ditampilkan (immutable, dari ArcSwap).
+    /// The snapshot being displayed (immutable, from ArcSwap).
     pub snapshot: Arc<Snapshot>,
+    /// Latest alert state (immutable, from ArcSwap).
+    pub alerts: Arc<AlertState>,
+    /// Filter used by the Sensors tab: only show sensors at or above this
+    /// temperature. `None` shows everything.
+    pub sensor_hot_only: bool,
+    /// Separate filter for the Services tab, so switching tabs never carries a
+    /// process filter into a service list.
+    pub service_search: String,
 }
 
 impl Default for AppState {
@@ -191,12 +241,15 @@ impl Default for AppState {
             feedback: None,
             show_signatures: false,
             snapshot: Arc::new(Snapshot::empty()),
+            alerts: Arc::new(AlertState::default()),
+            sensor_hot_only: false,
+            service_search: String::new(),
         }
     }
 }
 
 impl AppState {
-    /// Ambil snapshot baru kalau ada. Dipanggil sekali per frame.
+    /// Take a new snapshot if one is available. Called once per frame.
     pub fn update_snapshot(&mut self, snap: &Arc<Snapshot>) {
         if snap.seq == self.last_seq {
             return;
@@ -214,8 +267,16 @@ impl AppState {
             .iter()
             .map(|d| d.busy_percent)
             .fold(0.0f32, f32::max);
-        // Rata-rata suhu semua sensor suhu. `None` kalau tidak ada satu pun,
-        // supaya history tidak berisi 0 °C palsu.
+        let net = snap
+            .net
+            .iter()
+            .map(|n| n.rx_bps.saturating_add(n.tx_bps))
+            .max()
+            .unwrap_or(0) as f32
+            / 1024.0
+            / 1024.0;
+        // Average of every temperature sensor. `None` when none exist, so the
+        // chart never contains a fabricated 0 °C.
         let temps: Vec<f32> = snap
             .sensors
             .iter()
@@ -228,18 +289,22 @@ impl AppState {
             Some(temps.iter().sum::<f32>() / temps.len() as f32)
         };
         self.history
-            .push(snap.cpu.total_percent, used, gpu, disk, avg_temp);
+            .push(snap.cpu.total_percent, used, gpu, disk, net, avg_temp);
         self.snapshot = Arc::clone(snap);
     }
 
-    /// Baris proses yang lolos filter dan sudah diurutkan.
+    pub fn update_alerts(&mut self, alerts: &Arc<AlertState>) {
+        self.alerts = Arc::clone(alerts);
+    }
+
+    /// Process rows that pass the filter, sorted.
     pub fn visible_rows(&self) -> Vec<&ProcessRow> {
         let needle = self.search.trim().to_lowercase();
         let mut rows: Vec<&ProcessRow> = self
             .snapshot
             .processes
             .iter()
-            // PID 0 adalah idle: menampilkannya di puncak daftar hanya noise.
+            // PID 0 is idle: showing it at the top of the list is noise.
             .filter(|p| p.pid != 0)
             .filter(|p| self.show_system || !is_system(p))
             .filter(|p| {
@@ -270,18 +335,18 @@ impl AppState {
             self.sort_asc = !self.sort_asc;
         } else {
             self.sort = key;
-            // Kolom numerik mulai dari terbesar; kolom teks mulai dari A.
+            // Numeric columns start at the largest value; text starts at A.
             self.sort_asc = !key.is_numeric();
         }
     }
 
-    /// Baris untuk panel detail.
+    /// Row for the detail panel.
     pub fn detail_row(&self) -> Option<&ProcessRow> {
         let pid = self.detail_pid?;
         self.snapshot.processes.iter().find(|p| p.pid == pid)
     }
 
-    /// Jumlah turunan langsung dan tidak langsung dari sebuah PID.
+    /// Direct and indirect descendant count for a PID.
     pub fn descendant_count(&self, pid: u32) -> u32 {
         let mut count = 0;
         let mut frontier = vec![pid];
@@ -301,7 +366,7 @@ impl AppState {
         count
     }
 
-    /// Tampilkan pesan hasil aksi; hilang otomatis setelah 6 detik.
+    /// Show an action result; disappears after six seconds.
     pub fn set_feedback(&mut self, text: impl Into<String>, is_error: bool) {
         self.feedback = Some(ActionFeedback {
             text: text.into(),
@@ -310,7 +375,7 @@ impl AppState {
         });
     }
 
-    /// Buang feedback yang sudah kedaluwarsa.
+    /// Drop feedback that has expired.
     pub fn expire_feedback(&mut self) {
         if let Some(f) = &self.feedback {
             if f.shown_at.elapsed() > std::time::Duration::from_secs(6) {
@@ -320,7 +385,7 @@ impl AppState {
     }
 }
 
-/// Proses inti Windows yang disembunyikan kecuali pengguna memintanya.
+/// Core Windows processes hidden unless the user asks for them.
 fn is_system(p: &ProcessRow) -> bool {
     matches!(p.pid, 4)
         || matches!(
@@ -407,13 +472,13 @@ mod tests {
     #[test]
     fn sort_toggle_flips_direction() {
         let mut s = state_with(vec![row(1, "a", 1.0, 1), row(2, "b", 2.0, 1)]);
-        // Kolom numerik: klik pertama = menurun.
+        // Numeric column: first click sorts descending.
         s.set_sort(SortKey::Memory);
-        assert!(!s.sort_asc, "kolom numerik default menurun");
-        // Kolom sama: klik berikutnya membalik arah.
+        assert!(!s.sort_asc, "numeric columns default to descending");
+        // Same column: next click flips direction.
         s.set_sort(SortKey::Memory);
         assert!(s.sort_asc);
-        // Kolom teks: default menaik.
+        // Text column: defaults to ascending.
         s.set_sort(SortKey::Name);
         assert!(s.sort_asc);
     }
@@ -422,7 +487,7 @@ mod tests {
     fn history_is_capped() {
         let mut h = History::default();
         for i in 0..100 {
-            h.push(i as f32, 0.0, 0.0, 0.0, Some(40.0));
+            h.push(i as f32, 0.0, 0.0, 0.0, 0.0, Some(40.0));
         }
         assert_eq!(h.cpu.len(), 60);
         assert_eq!(h.cpu[59], 99.0);
@@ -435,9 +500,9 @@ mod tests {
     fn history_without_sensors_has_no_temperature() {
         let mut h = History::default();
         for _ in 0..5 {
-            h.push(10.0, 20.0, 0.0, 0.0, None);
+            h.push(10.0, 20.0, 0.0, 0.0, 0.0, None);
         }
-        assert!(h.temp.is_empty(), "tidak boleh ada 0 °C palsu");
+        assert!(h.temp.is_empty(), "no fabricated 0 °C");
         assert!(!h.has_temp);
         assert_eq!(h.last_temp(), None);
     }
@@ -445,18 +510,10 @@ mod tests {
     #[test]
     fn history_keeps_temperature_series_in_sync() {
         let mut h = History::default();
-        h.push(1.0, 2.0, 3.0, 4.0, Some(50.0));
-        h.push(1.0, 2.0, 3.0, 4.0, Some(52.0));
+        h.push(1.0, 2.0, 3.0, 4.0, 0.0, Some(50.0));
+        h.push(1.0, 2.0, 3.0, 4.0, 0.0, Some(52.0));
         assert_eq!(h.last_temp(), Some(52.0));
         assert_eq!(h.temp.len(), 2);
-    }
-
-    #[test]
-    fn sparkline_accepts_temperature_series() {
-        // Suhu tidak 0–100, jadi skala grafiknya berbeda; yang diuji di sini
-        // hanya bahwa seri suhu bisa dipakai tanpa panik.
-        let h = History::default();
-        assert!(h.temp.is_empty());
     }
 
     #[test]
@@ -471,7 +528,7 @@ mod tests {
         assert_eq!(
             s.history.cpu.len(),
             1,
-            "seq sama tidak boleh menambah histori"
+            "same seq must not add a history point"
         );
     }
 }

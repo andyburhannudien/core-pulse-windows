@@ -28,7 +28,7 @@ pub fn collect() -> (Vec<ServiceRow>, Vec<Degradation>) {
         degraded.push(Degradation {
             area: crate::model::Area::Services,
             reason: DegradeReason::ApiFailed,
-            detail: "OpenSCManagerW gagal".into(),
+            detail: "OpenSCManagerW failed".into(),
         });
         return (out, degraded);
     };

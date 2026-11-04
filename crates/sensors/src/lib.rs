@@ -16,6 +16,7 @@
 pub mod acpi;
 pub mod bridge;
 pub mod gpu_vendor;
+pub mod helper;
 pub mod smart;
 use core_pulse_core::model::{
     Area, Confidence, Degradation, DegradeReason, SensorReading, SensorSource, Snapshot,
@@ -26,7 +27,7 @@ use core_pulse_core::model::{
 pub enum Availability {
     Available,
     NeedsElevation,
-    NotAvailable(&'static str),
+    NotAvailable(String),
     Failed(String),
 }
 
@@ -38,7 +39,7 @@ impl Availability {
             Self::Available => S::Available,
             Self::NeedsElevation => S::NeedsElevation,
             Self::NotAvailable(reason) => S::NotAvailable {
-                reason: (*reason).to_string(),
+                reason: reason.clone(),
             },
             Self::Failed(e) => S::Failed { error: e.clone() },
         }
@@ -90,6 +91,9 @@ pub struct Sensors {
     readings: Vec<SensorReading>,
     last_probe: Option<std::time::Instant>,
     report: SensorReport,
+    /// Kalau true, setiap `poll()` juga mencoba helper elevated. Default mati
+    /// supaya test tidak bergantung pada pipe di mesin.
+    helper_enabled: bool,
 }
 
 /// Probe ulang status provider setiap 30 detik. Perangkat keras bisa dicolok
@@ -110,6 +114,11 @@ impl Sensors {
     }
 
     pub fn with_bridge(enable_bridge: bool) -> Self {
+        Self::with_options(enable_bridge, false)
+    }
+
+    /// Konstruktor lengkap: bridge pihak ketiga dan helper elevated.
+    pub fn with_options(enable_bridge: bool, enable_helper: bool) -> Self {
         let mut providers: Vec<Box<dyn SensorProvider>> = vec![
             Box::new(acpi::PdhThermalProvider::new()),
             Box::new(smart::SmartProvider::new()),
@@ -118,21 +127,30 @@ impl Sensors {
         if enable_bridge {
             providers.push(Box::new(bridge::LhmBridgeProvider::new()));
         }
-        let status = vec![Availability::NotAvailable("belum diprobe"); providers.len()];
+        let status = vec![Availability::NotAvailable("not probed yet".into()); providers.len()];
         Self {
             providers,
             status,
             readings: Vec::with_capacity(32),
             last_probe: None,
             report: SensorReport::default(),
+            helper_enabled: enable_helper,
         }
+    }
+
+    pub fn enable_helper(&mut self, enabled: bool) {
+        self.helper_enabled = enabled;
+    }
+
+    pub fn helper_enabled(&self) -> bool {
+        self.helper_enabled
     }
 
     /// Daftarkan provider tambahan (dipakai test dan CLI `--bridge`).
     pub fn register(&mut self, provider: Box<dyn SensorProvider>) {
         self.providers.push(provider);
         self.status
-            .push(Availability::NotAvailable("belum diprobe"));
+            .push(Availability::NotAvailable("not probed yet".into()));
     }
 
     /// Probe semua provider. Dipanggil saat startup dan setiap 30 detik, atau
@@ -188,30 +206,43 @@ impl Sensors {
             }
         }
 
+        let mut report = SensorReport {
+            readings: self.readings.clone(),
+            degraded,
+            statuses,
+        };
+
+        // Helper elevated: satu koneksi berumur pendek per putaran. Kalau
+        // helper mati, merge hanya menambahkan status "helper", bukan error.
+        if self.helper_enabled {
+            let outcome = helper::fetch_once();
+            if let Err(error) = &outcome {
+                tracing::debug!(error = %error, "helper tidak tersedia");
+            }
+            helper::merge_into(&mut report, outcome);
+        }
+
         // Buang nilai yang tidak masuk akal. Sumber yang salah lebih berbahaya
-        // daripada tidak ada sumber, karena terlihat meyakinkan.
-        let before = self.readings.len();
-        self.readings.retain(is_plausible);
-        if self.readings.len() < before {
+        // daripada tidak ada sumber, karena terlihat meyakinkan. Ini juga
+        // berlaku untuk data dari helper.
+        let before = report.readings.len();
+        report.readings.retain(is_plausible);
+        if report.readings.len() < before {
             tracing::warn!(
-                dropped = before - self.readings.len(),
+                dropped = before - report.readings.len(),
                 "membuang bacaan sensor di luar rentang fisik"
             );
         }
 
         // Urutkan stabil: suhu dulu, lalu per label. Membuat UI tidak "melompat"
         // setiap detik saat urutan instance berubah.
-        self.readings.sort_by(|a, b| {
+        report.readings.sort_by(|a, b| {
             (a.kind as u8)
                 .cmp(&(b.kind as u8))
                 .then_with(|| a.label.to_lowercase().cmp(&b.label.to_lowercase()))
         });
 
-        self.report = SensorReport {
-            readings: self.readings.clone(),
-            degraded,
-            statuses,
-        };
+        self.report = report;
         &self.report
     }
 

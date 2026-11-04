@@ -67,10 +67,17 @@ enum Command {
         /// Aktifkan bridge LibreHardwareMonitor (opt-in, default mati).
         #[arg(long)]
         bridge: bool,
+        /// Gabungkan bacaan dari helper elevated (kalau berjalan).
+        #[arg(long)]
+        helper: bool,
         /// Jumlah sampel berturut-turut.
         #[arg(long, default_value_t = 2)]
         samples: u32,
     },
+    /// Periksa helper elevated: versi, hak akses, status provider, dan bacaan.
+    Helper,
+    /// Uji helper end-to-end: spawn, frame rusak, helper mati (Gate G4).
+    HelperSelftest,
     /// Rekam N snapshot ke file untuk fixture test.
     Record {
         #[arg(long, default_value = "fixture.json")]
@@ -105,7 +112,13 @@ fn main() -> anyhow::Result<()> {
         Command::Services { limit } => list_services(limit),
         Command::Startup => list_startup(),
         Command::Users => list_users(),
-        Command::Sensors { bridge, samples } => list_sensors(bridge, samples),
+        Command::Sensors {
+            bridge,
+            helper,
+            samples,
+        } => list_sensors(bridge, helper, samples),
+        Command::Helper => helper_probe(),
+        Command::HelperSelftest => helper_selftest(),
         Command::Record { out, samples } => record(&out, samples),
     }
 }
@@ -163,7 +176,7 @@ fn print_json(snap: &Snapshot) -> anyhow::Result<()> {
 }
 
 fn print_table(snap: &Snapshot, limit: usize, sort: &str) {
-    // PID 0 adalah idle: menampilkannya sebagai "proses paling rakus CPU" hanya
+    // PID 0 is idle: showing it as the "hungriest CPU process" only
     // menyesatkan. Task Manager juga tidak menampilkannya di tab Processes.
     let mut rows: Vec<&core_pulse_core::ProcessRow> =
         snap.processes.iter().filter(|p| p.pid != 0).collect();
@@ -179,7 +192,7 @@ fn print_table(snap: &Snapshot, limit: usize, sort: &str) {
     }
 
     println!(
-        "core-pulse  seq {}  {:.1}% CPU  {:.1}/{:.1} GB RAM (tekanan {})  {} proses",
+        "core-pulse  seq {}  {:.1}% CPU  {:.1}/{:.1} GB RAM (pressure {})  {} processes",
         snap.seq,
         snap.cpu.total_percent,
         snap.memory.in_use_bytes as f64 / 1e9,
@@ -207,7 +220,7 @@ fn print_table(snap: &Snapshot, limit: usize, sort: &str) {
     }
 
     if !snap.disks.is_empty() {
-        println!("\ndisk:");
+        println!("\ndisks:");
         for d in &snap.disks {
             println!(
                 "  #{} {:<24} busy {:>5.1}%  R {:>9}/s  W {:>9}/s  q {:.2}",
@@ -221,7 +234,7 @@ fn print_table(snap: &Snapshot, limit: usize, sort: &str) {
         }
     }
     if !snap.gpus.is_empty() {
-        println!("\ngpu:");
+        println!("\ngpus:");
         for g in &snap.gpus {
             println!(
                 "  {:<32} util {}",
@@ -233,10 +246,10 @@ fn print_table(snap: &Snapshot, limit: usize, sort: &str) {
         }
     }
     if !snap.net.is_empty() {
-        println!("\njaringan:");
+        println!("\nnetwork:");
         for n in &snap.net {
             println!(
-                "  {:<24} {:>9}/s turun  {:>9}/s naik  {}",
+                "  {:<24} {:>9}/s down  {:>9}/s up    {}",
                 truncate(&n.name, 24),
                 human_bytes(n.rx_bps),
                 human_bytes(n.tx_bps),
@@ -245,7 +258,7 @@ fn print_table(snap: &Snapshot, limit: usize, sort: &str) {
         }
     }
     if !snap.degraded.is_empty() {
-        println!("\ndegradasi:");
+        println!("\ndegraded sources:");
         for d in &snap.degraded {
             println!("  - {:?}/{:?}: {}", d.area, d.reason, d.detail);
         }
@@ -274,10 +287,10 @@ fn doctor() -> anyhow::Result<()> {
         "  OS          : {} (build {})",
         snap.host.os_name, snap.host.os_build
     );
-    println!("  Mesin       : {}", snap.host.computer_name);
+    println!("  Machine     : {}", snap.host.computer_name);
     println!("  CPU         : {}", snap.host.cpu_brand);
     println!(
-        "  Core        : {} fisik / {} logis @ {} MHz",
+        "  Cores       : {} physical / {} logical @ {} MHz",
         snap.host.physical_cores, snap.host.logical_cores, snap.host.base_clock_mhz
     );
     println!(
@@ -285,9 +298,9 @@ fn doctor() -> anyhow::Result<()> {
         snap.host.total_ram_bytes as f64 / 1e9
     );
     println!("  Elevated    : {}", snap.host.is_elevated);
-    println!("  Proses      : {}", snap.processes.len());
+    println!("  Processes   : {}", snap.processes.len());
     println!(
-        "  Memori      : in use {:.2} GB, standby {:.2} GB, free {:.2} GB, commit {:.2}/{:.2} GB",
+        "  Memory      : in use {:.2} GB, standby {:.2} GB, free {:.2} GB, commit {:.2}/{:.2} GB",
         snap.memory.in_use_bytes as f64 / 1e9,
         snap.memory.standby_bytes as f64 / 1e9,
         snap.memory.free_bytes as f64 / 1e9,
@@ -295,10 +308,10 @@ fn doctor() -> anyhow::Result<()> {
         snap.memory.commit_limit_bytes as f64 / 1e9,
     );
 
-    println!("\n  Sumber data:");
+    println!("\n  Data sources:");
     println!("    CPU per-core      : {}", ok(has_per_core(&snap)));
     println!(
-        "    Memori komposisi  : {}",
+        "    Memory breakdown  : {}",
         ok(snap.memory.standby_bytes > 0)
     );
     println!(
@@ -306,29 +319,29 @@ fn doctor() -> anyhow::Result<()> {
         availability(snap.disks.len(), "disk")
     );
     println!(
-        "    Jaringan          : {}",
-        availability(snap.net.len(), "adapter")
+        "    Network           : {}",
+        availability(snap.net.len(), "network adapter")
     );
     println!(
         "    GPU (PDH)         : {}",
-        availability(snap.gpus.len(), "adapter")
+        availability(snap.gpus.len(), "GPU adapter")
     );
     println!(
-        "    Suhu ACPI/PDH     : {}",
+        "    ACPI/PDH temp     : {}",
         match snap
             .degraded
             .iter()
             .find(|d| d.area == core_pulse_core::Area::Sensors)
         {
-            Some(d) => format!("tidak tersedia ({:?})", d.reason),
-            None => "belum diprobe".into(),
+            Some(d) => format!("unavailable ({:?})", d.reason),
+            None => "not probed yet".into(),
         }
     );
-    println!("    Suhu disk SMART   : belum diimplementasikan (P3)");
-    println!("    Suhu GPU          : belum diimplementasikan (P3)");
+    println!("    Disk SMART temp   : needs the elevated helper");
+    println!("    GPU temperature   : needs a vendor SDK or the LHM bridge");
 
     if !snap.disks.is_empty() {
-        println!("\n  Disk fisik:");
+        println!("\n  Physical disks:");
         for d in &snap.disks {
             println!(
                 "    #{} {:<26} {:?}/{:?} {:>9}{}  busy {:>5.1}%  R {:>9}/s  W {:>9}/s  q {:.2}",
@@ -338,7 +351,7 @@ fn doctor() -> anyhow::Result<()> {
                 d.media,
                 human_bytes(d.size_bytes),
                 if d.size_is_estimate {
-                    " (estimasi)"
+                    " (estimated)"
                 } else {
                     ""
                 },
@@ -350,10 +363,10 @@ fn doctor() -> anyhow::Result<()> {
         }
     }
     if !snap.volumes.is_empty() {
-        println!("\n  Volume:");
+        println!("\n  Volumes:");
         for v in &snap.volumes {
             println!(
-                "    {:<4} {:<18} {:<6} {:>9} bebas / {:>9}  disk {:?}",
+                "    {:<4} {:<18} {:<6} {:>9} free / {:>9}  disk {:?}",
                 v.mount,
                 v.label,
                 v.fs,
@@ -364,10 +377,10 @@ fn doctor() -> anyhow::Result<()> {
         }
     }
     if !snap.gpus.is_empty() {
-        println!("\n  GPU:");
+        println!("\n  GPUs:");
         for g in &snap.gpus {
             println!(
-                "    {:<34} {:?}  util {:>6}  mem khusus {:>9}  bersama {:>9}",
+                "    {:<34} {:?}  util {:>6}  dedicated {:>9}  shared {:>9}",
                 g.name,
                 g.vendor,
                 g.utilization_percent
@@ -402,7 +415,7 @@ fn action_selftest() -> anyhow::Result<()> {
     fn check(label: &str, ok: bool, detail: &str) -> bool {
         println!(
             "  [{}] {label}{}",
-            if ok { "LULUS" } else { "GAGAL" },
+            if ok { "PASS" } else { "FAIL" },
             if detail.is_empty() {
                 String::new()
             } else {
@@ -419,7 +432,7 @@ fn action_selftest() -> anyhow::Result<()> {
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .spawn()
-            .expect("gagal spawn proses uji");
+            .expect("failed to spawn the test process");
         let pid = child.id();
         std::mem::forget(child);
         std::thread::sleep(Duration::from_millis(400));
@@ -430,14 +443,14 @@ fn action_selftest() -> anyhow::Result<()> {
         let row = rows
             .iter()
             .find(|r| r.pid == pid)
-            .expect("proses uji hilang");
+            .expect("test process disappeared");
         (pid, row.start_time_unix_ms)
     }
 
     println!("core-pulse action-selftest");
-    println!("(setiap skenario memakai proses uji yang benar-benar berjalan)\n");
+    println!("(each scenario uses a real process that is actually running)\n");
 
-    // --- 1. Identitas benar: aksi harus berhasil ---
+    // --- 1. Correct identity: the action must succeed ---
     let (pid, start) = spawn_and_locate();
     let key = core_pulse_core::model::ProcessKey {
         pid,
@@ -445,12 +458,12 @@ fn action_selftest() -> anyhow::Result<()> {
     };
     let ok = match action::terminate(&key, "cmd.exe") {
         Ok(outcome) => check(
-            "identitas benar → terminate berhasil",
+            "correct identity → terminate succeeds",
             outcome.affected == 1,
             "",
         ),
         Err(e) => check(
-            "identitas benar → terminate berhasil",
+            "correct identity → terminate succeeds",
             false,
             &e.to_string(),
         ),
@@ -459,7 +472,7 @@ fn action_selftest() -> anyhow::Result<()> {
         failures += 1;
     }
 
-    // --- 2. Identitas basi: harus ditolak dan proses tetap hidup ---
+    // --- 2. Stale identity: must be rejected and the process must stay alive ---
     let (pid, start) = spawn_and_locate();
     let stale = core_pulse_core::model::ProcessKey {
         pid,
@@ -471,36 +484,36 @@ fn action_selftest() -> anyhow::Result<()> {
             actual_ms,
         }) => {
             if !check(
-                "identitas basi → ditolak",
+                "stale identity → rejected",
                 true,
-                &format!("PID {pid}, diharapkan {expected_ms} ms, aktual {actual_ms} ms"),
+                &format!("PID {pid}, expected {expected_ms} ms, actual {actual_ms} ms"),
             ) {
                 failures += 1;
             }
         }
         Ok(_) => {
             check(
-                "identitas basi → ditolak",
+                "stale identity → rejected",
                 false,
-                "proses terlanjur dimatikan",
+                "process was killed prematurely",
             );
             failures += 1;
         }
         Err(e) => {
             check(
-                "identitas basi → ditolak",
+                "stale identity → rejected",
                 false,
-                &format!("error salah: {e}"),
+                &format!("wrong error: {e}"),
             );
             failures += 1;
         }
     }
-    // Pastikan proses memang masih hidup.
+    // Confirm the process really is still alive.
     let mut c = ProcCollector::new();
     let _ = c.collect(1.0);
     let (rows, _) = c.collect(1.0);
     let alive = rows.iter().any(|r| r.pid == pid);
-    if !check("setelah ditolak, proses tetap hidup", alive, "") {
+    if !check("after rejection the process is still alive", alive, "") {
         failures += 1;
     }
     let _ = Command::new("taskkill")
@@ -509,7 +522,7 @@ fn action_selftest() -> anyhow::Result<()> {
         .stderr(Stdio::null())
         .status();
 
-    // --- 3. PID yang sudah mati ---
+    // --- 3. Non-existent PID ---
     let dead = core_pulse_core::model::ProcessKey {
         pid: 0xFFFF_FF00,
         start_time_unix_ms: 1,
@@ -518,11 +531,11 @@ fn action_selftest() -> anyhow::Result<()> {
         action::terminate(&dead, "ghost.exe"),
         Err(ActionError::ProcessGone) | Err(ActionError::AccessDenied)
     );
-    if !check("PID tidak ada → ditolak", ok, "") {
+    if !check("non-existent PID → rejected", ok, "") {
         failures += 1;
     }
 
-    // --- 4. Proses kritikal ---
+    // --- 4. Critical process ---
     let system = core_pulse_core::model::ProcessKey {
         pid: 4,
         start_time_unix_ms: 0,
@@ -531,40 +544,44 @@ fn action_selftest() -> anyhow::Result<()> {
         action::terminate(&system, "System"),
         Err(ActionError::CriticalProcess)
     );
-    if !check("proses kritikal (PID 4) → ditolak", ok, "") {
+    if !check("critical process (PID 4) → rejected", ok, "") {
         failures += 1;
     }
 
-    // --- 5. Aksi non-destruktif pada proses sendiri tidak boleh crash ---
+    // --- 5. A non-destructive action on our own process must not crash ---
     let me = core_pulse_core::model::ProcessKey {
         pid: std::process::id(),
         start_time_unix_ms: 0,
     };
-    // Waktu pembuatan sengaja salah, jadi harus ditolak dengan IdentityChanged.
+    // The creation time is deliberately wrong, so this must be rejected with IdentityChanged.
     let ok = matches!(
         action::set_priority(&me, "core-pulse-cli.exe", action::Priority::Normal),
         Err(ActionError::IdentityChanged { .. })
     );
-    if !check("identitas salah pada aksi non-destruktif → ditolak", ok, "") {
+    if !check(
+        "wrong identity rejected for a non-destructive action",
+        ok,
+        "",
+    ) {
         failures += 1;
     }
 
     println!();
     if failures == 0 {
-        println!("G2: LULUS (semua skenario sesuai harapan)");
+        println!("G2: PASS (all scenarios behaved as expected)");
         Ok(())
     } else {
-        println!("G2: {failures} skenario GAGAL");
-        anyhow::bail!("action selftest gagal")
+        println!("G2: {failures} scenario(s) FAILED");
+        anyhow::bail!("action selftest failed")
     }
 }
 
 fn list_services(limit: usize) -> anyhow::Result<()> {
     let (services, degraded) = core_pulse_core::sys::services::collect();
-    println!("{} layanan", services.len());
+    println!("{} services", services.len());
     println!(
         "{:<28} {:<46} {:<10} {:<8} {:>7}",
-        "NAMA", "TAMPILAN", "STATUS", "START", "PID"
+        "NAME", "DISPLAY NAME", "STATE", "STARTUP", "PID"
     );
     for s in services.iter().take(limit) {
         println!(
@@ -581,15 +598,15 @@ fn list_services(limit: usize) -> anyhow::Result<()> {
         );
     }
     for d in degraded {
-        println!("degradasi: {:?}/{:?}: {}", d.area, d.reason, d.detail);
+        println!("degraded: {:?}/{:?}: {}", d.area, d.reason, d.detail);
     }
     Ok(())
 }
 
 fn list_startup() -> anyhow::Result<()> {
     let (entries, degraded) = core_pulse_core::sys::startup::collect();
-    println!("{} entri startup", entries.len());
-    println!("{:<46} {:<16} {:<6} FILE", "NAMA", "SUMBER", "32BIT");
+    println!("{} startup entries", entries.len());
+    println!("{:<46} {:<16} {:<6} TARGET", "NAME", "SOURCE", "32BIT");
     for e in &entries {
         println!(
             "{:<46} {:<16} {:<6} {}",
@@ -597,14 +614,14 @@ fn list_startup() -> anyhow::Result<()> {
             e.source.label(),
             if e.is_32bit { "ya" } else { "—" },
             match e.target_exists {
-                Some(true) => "ada",
-                Some(false) => "hilang",
+                Some(true) => "present",
+                Some(false) => "missing",
                 None => "—",
             }
         );
     }
     for d in degraded {
-        println!("degradasi: {:?}/{:?}: {}", d.area, d.reason, d.detail);
+        println!("degraded: {:?}/{:?}: {}", d.area, d.reason, d.detail);
     }
     Ok(())
 }
@@ -618,10 +635,10 @@ fn list_users() -> anyhow::Result<()> {
         std::thread::sleep(Duration::from_millis(600));
     }
     let snap = collector.sample();
-    println!("{} sesi", snap.sessions.len());
+    println!("{} session(s)", snap.sessions.len());
     println!(
         "{:>5} {:<30} {:<12} {:>8} {:>8} {:>10}",
-        "SESI", "PENGGUNA", "STATUS", "PROSES", "CPU", "MEMORI"
+        "SESSION", "USER", "STATE", "PROCESSES", "CPU", "MEMORY"
     );
     for s in &snap.sessions {
         println!(
@@ -639,9 +656,11 @@ fn list_users() -> anyhow::Result<()> {
 
 fn availability(count: usize, unit: &str) -> String {
     if count == 0 {
-        "TIDAK tersedia".to_string()
+        "NOT available".to_string()
+    } else if count == 1 {
+        format!("available (1 {unit})")
     } else {
-        format!("tersedia ({count} {unit})")
+        format!("available ({count} {unit}s)")
     }
 }
 
@@ -649,29 +668,35 @@ fn availability(count: usize, unit: &str) -> String {
 ///
 /// Ini alat verifikasi yang sama yang dipakai untuk memutuskan apakah fitur
 /// "monitoring suhu" benar-benar berfungsi di sebuah mesin — bukan asumsi.
-fn list_sensors(enable_bridge: bool, samples: u32) -> anyhow::Result<()> {
+fn list_sensors(enable_bridge: bool, enable_helper: bool, samples: u32) -> anyhow::Result<()> {
     use core_pulse_sensors::Availability;
 
-    let mut sensors = core_pulse_sensors::Sensors::with_bridge(enable_bridge);
-    println!("core-pulse sensors (bridge: {enable_bridge})");
+    let mut sensors = core_pulse_sensors::Sensors::with_options(enable_bridge, enable_helper);
+    println!("core-pulse sensors (bridge: {enable_bridge}, helper: {enable_helper})");
     println!(
-        "Provider: acpi-pdh, smart, gpu-vendor{}\n",
-        if enable_bridge { ", lhm-bridge" } else { "" }
+        "Provider: acpi-pdh, smart, gpu-vendor{}{}\n",
+        if enable_bridge { ", lhm-bridge" } else { "" },
+        if enable_helper { ", helper" } else { "" }
     );
 
     sensors.probe_all(true);
 
-    println!("Status provider:");
-    let statuses: Vec<(String, String)> = sensors
-        .statuses()
+    // Poll pertama juga menggabungkan status helper. Status lokal saja tidak
+    // cukup: provider SMART bisa "butuh administrator" padahal helper sudah
+    // menyediakan datanya.
+    let first_report = sensors.poll().clone();
+    println!("Provider status:");
+    let statuses: Vec<(String, String)> = first_report
+        .statuses
+        .iter()
         .map(|(id, a)| {
             let text = match a {
-                Availability::Available => "tersedia".to_string(),
-                Availability::NeedsElevation => "butuh administrator (helper P4)".to_string(),
-                Availability::NotAvailable(why) => format!("tidak tersedia: {why}"),
-                Availability::Failed(e) => format!("gagal: {e}"),
+                Availability::Available => "available".to_string(),
+                Availability::NeedsElevation => "needs administrator".to_string(),
+                Availability::NotAvailable(why) => format!("unavailable: {why}"),
+                Availability::Failed(e) => format!("failed: {e}"),
             };
-            (id.to_string(), text)
+            (id.clone(), text)
         })
         .collect();
     for (id, text) in &statuses {
@@ -683,14 +708,14 @@ fn list_sensors(enable_bridge: bool, samples: u32) -> anyhow::Result<()> {
             std::thread::sleep(Duration::from_secs(2));
         }
         let report = sensors.poll();
-        println!("\nSampel {}: {} bacaan", i + 1, report.readings.len());
+        println!("\nSample {}: {} reading(s)", i + 1, report.readings.len());
         if report.readings.is_empty() {
-            println!("  (tidak ada sensor yang bisa dibaca — lihat status di atas)");
+            println!("  (no readable sensor — see the status above)");
             continue;
         }
         println!(
             "  {:<28} {:>9} {:<9} {:<12} {:<12} ID",
-            "LABEL", "NILAI", "SATUAN", "SUMBER", "CONFIDENCE"
+            "LABEL", "VALUE", "UNIT", "SOURCE", "CONFIDENCE"
         );
         for r in &report.readings {
             println!(
@@ -720,12 +745,12 @@ fn list_sensors(enable_bridge: bool, samples: u32) -> anyhow::Result<()> {
 
     println!("\nG3:");
     println!(
-        "  suhu disk           : {}",
+        "  Disk temperature    : {}",
         if disk_temps.is_empty() {
-            "belum terbaca".to_string()
+            "not read yet".to_string()
         } else {
             format!(
-                "{} sensor ({})",
+                "{} sensor(s) ({})",
                 disk_temps.len(),
                 disk_temps
                     .iter()
@@ -735,11 +760,185 @@ fn list_sensors(enable_bridge: bool, samples: u32) -> anyhow::Result<()> {
             )
         }
     );
-    println!("  suhu CPU            : {cpu_status}");
+    println!("  CPU temperature     : {cpu_status}");
     println!(
-        "  catatan             : suhu CPU tidak tersedia bukan bug; firmware mesin ini \
-         tidak mengekspos ACPI thermal zone (docs/ENVIRONMENT-AUDIT.md)"
+        "  note                : a missing CPU temperature is not a bug; this firmware \
+         exposes no ACPI thermal zone (docs/ENVIRONMENT-AUDIT.md)"
     );
+    Ok(())
+}
+
+/// Inspect the elevated helper over its named pipe. This command does not
+/// require admin; it only reads what the helper already provides.
+fn helper_probe() -> anyhow::Result<()> {
+    use core_pulse_sensors::helper;
+
+    println!(
+        "expected helper: {}",
+        helper::expected_helper_path().display()
+    );
+
+    let data = helper::fetch_once().map_err(|e| anyhow::anyhow!("{e}"))?;
+    println!(
+        "connected: version {} (PID {}), elevated: {}",
+        data.info.version, data.info.pid, data.info.elevated
+    );
+
+    println!("\nProvider status inside the helper:");
+    for status in &data.statuses {
+        let text = match &status.availability {
+            core_pulse_core::model::SensorAvailability::Available => "available".to_string(),
+            core_pulse_core::model::SensorAvailability::NeedsElevation => {
+                "needs administrator".to_string()
+            }
+            core_pulse_core::model::SensorAvailability::NotAvailable { reason } => {
+                format!("unavailable: {reason}")
+            }
+            core_pulse_core::model::SensorAvailability::Failed { error } => {
+                format!("failed: {error}")
+            }
+        };
+        println!("  {:<14} {text}", status.provider);
+    }
+
+    println!("\nReadings: {} sensor(s)", data.readings.len());
+    for r in &data.readings {
+        println!(
+            "  {:<28} {:>7.1} {:<8} {:<12} {}",
+            truncate(&r.label, 28),
+            r.value,
+            format!("{:?}", r.unit),
+            format!("{:?}", r.source),
+            r.id
+        );
+    }
+
+    if !data.info.elevated {
+        println!("\nWARNING: the helper is running without elevation; SMART stays unavailable.");
+    }
+    Ok(())
+}
+
+/// Uji helper end-to-end untuk Gate G4.
+///
+/// Yang diuji bukan hanya "happy path": frame >1 MiB, JSON tidak valid, dan
+/// helper yang mati di tengah jalan. Setelah setiap frame rusak, helper harus
+/// tetap melayani klien baru.
+fn helper_selftest() -> anyhow::Result<()> {
+    use core_pulse_ipc::pipe::PipeClient;
+    use core_pulse_ipc::{FrameHeader, PIPE_NAME, PROTO_VERSION};
+    use core_pulse_sensors::helper::{self, HelperError};
+    use std::process::{Command, Stdio};
+    use std::time::{Duration, Instant};
+
+    struct KillGuard(std::process::Child);
+    impl Drop for KillGuard {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+
+    let helper_path = helper::expected_helper_path();
+    if !helper_path.is_file() {
+        anyhow::bail!("helper not found at {}", helper_path.display());
+    }
+
+    if PipeClient::connect_timeout(PIPE_NAME, 50).is_ok() {
+        println!("SKIP: a helper is already running; stop it first to run the self-test");
+        return Ok(());
+    }
+
+    println!("spawn: {}", helper_path.display());
+    let child = Command::new(&helper_path)
+        .arg("--console")
+        .env("CORE_PULSE_LOG", "error")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|e| anyhow::anyhow!("failed to spawn helper: {e}"))?;
+    let mut guard = KillGuard(child);
+
+    // Tunggu pipe siap, maksimum 5 detik.
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut ready = false;
+    while Instant::now() < deadline {
+        if PipeClient::connect_timeout(PIPE_NAME, 50).is_ok() {
+            ready = true;
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    if !ready {
+        anyhow::bail!("the helper did not open its pipe within 5 seconds");
+    }
+    println!("OK   pipe ready");
+
+    let first = helper::fetch_once().map_err(|e| anyhow::anyhow!("first fetch: {e}"))?;
+    println!(
+        "OK   hello + sensors: version {} elevated {} ({} readings)",
+        first.info.version,
+        first.info.elevated,
+        first.readings.len()
+    );
+
+    // Frame dengan panjang 2 MB: harus ditolak sebelum alokasi.
+    {
+        let client = PipeClient::connect_timeout(PIPE_NAME, 500)
+            .map_err(|e| anyhow::anyhow!("connect (oversized): {e}"))?;
+        let header = FrameHeader {
+            length: 2_000_000,
+            proto_version: PROTO_VERSION,
+        };
+        client
+            .write_raw(&header.encode(), 500)
+            .map_err(|e| anyhow::anyhow!("write oversized frame: {e}"))?;
+    }
+    std::thread::sleep(Duration::from_millis(300));
+    helper::fetch_once()
+        .map_err(|e| anyhow::anyhow!("helper died after the oversized frame: {e}"))?;
+    println!("OK   frame >1 MiB rejected, helper still alive");
+
+    // JSON tidak valid dengan header yang sah.
+    {
+        let client = PipeClient::connect_timeout(PIPE_NAME, 500)
+            .map_err(|e| anyhow::anyhow!("connect (invalid json): {e}"))?;
+        let payload = b"not json";
+        let header = FrameHeader {
+            length: payload.len() as u32,
+            proto_version: PROTO_VERSION,
+        };
+        let mut frame = Vec::from(header.encode());
+        frame.extend_from_slice(payload);
+        client
+            .write_raw(&frame, 500)
+            .map_err(|e| anyhow::anyhow!("write invalid frame: {e}"))?;
+    }
+    std::thread::sleep(Duration::from_millis(300));
+    helper::fetch_once().map_err(|e| anyhow::anyhow!("helper died after the invalid JSON: {e}"))?;
+    println!("OK   invalid JSON rejected, helper still alive");
+
+    // Matikan helper: klien harus gagal cepat dengan NotRunning.
+    let _ = guard.0.kill();
+    let _ = guard.0.wait();
+
+    let start = Instant::now();
+    let error = helper::fetch_once().expect_err("helper is dead, fetch must fail");
+    let elapsed = start.elapsed();
+    match error {
+        HelperError::NotRunning(_) => {}
+        other => anyhow::bail!("wrong error after the helper died: {other}"),
+    }
+    if elapsed > Duration::from_secs(2) {
+        anyhow::bail!("helper-death detection too slow: {elapsed:?}");
+    }
+    println!(
+        "OK   helper death detected in {:.0} ms (NotRunning)",
+        elapsed.as_secs_f64() * 1000.0
+    );
+
+    println!("\nG4 helper-selftest: PASS");
     Ok(())
 }
 
@@ -759,7 +958,7 @@ fn human_bytes(n: u64) -> String {
 }
 
 fn ok(v: bool) -> &'static str {
-    if v { "tersedia" } else { "TIDAK tersedia" }
+    if v { "available" } else { "NOT available" }
 }
 
 fn has_per_core(snap: &Snapshot) -> bool {
@@ -891,7 +1090,7 @@ fn bench(seconds: u64) -> anyhow::Result<()> {
         failed = true;
     }
     if !failed {
-        println!("BUDGET: LULUS");
+        println!("BUDGET: PASS");
     }
     Ok(())
 }
@@ -905,7 +1104,7 @@ fn verify(seconds: u64, io_size_mb: u64) -> anyhow::Result<()> {
 
     // Query independen: sengaja dibuat terpisah dari collector supaya bug
     // parsing/agregasi di collector tidak ikut "terverifikasi" oleh dirinya sendiri.
-    let mut ref_query = Query::new().ok_or_else(|| anyhow::anyhow!("PDH tidak tersedia"))?;
+    let mut ref_query = Query::new().ok_or_else(|| anyhow::anyhow!("PDH unavailable"))?;
     let ref_read = ref_query.add(r"\PhysicalDisk(*)\Disk Read Bytes/sec");
     let ref_write = ref_query.add(r"\PhysicalDisk(*)\Disk Write Bytes/sec");
     let ref_idle = ref_query.add(r"\PhysicalDisk(*)\% Idle Time");
@@ -1055,7 +1254,7 @@ fn verify(seconds: u64, io_size_mb: u64) -> anyhow::Result<()> {
     let all_ok =
         check(&disk_diffs, 0.05) && check(&gpu_diffs, 0.05) && check(&net_diffs, 0.10) && io_ok;
     if all_ok {
-        println!("\nG1: LULUS");
+        println!("\nG1: PASS");
     } else {
         println!("\nG1: ADA SELISIH DI LUAR AMBANG");
     }
@@ -1135,7 +1334,7 @@ fn verify_real_io(size_mb: u64) -> anyhow::Result<bool> {
     let _ = std::fs::remove_file(&path);
 
     if samples == 0 || total_written == 0 {
-        println!("\nI/O nyata: dilewati (tidak ada sampel)");
+        println!("\nReal I/O: skipped (no samples)");
         return Ok(true);
     }
 
@@ -1157,7 +1356,7 @@ fn verify_real_io(size_mb: u64) -> anyhow::Result<bool> {
     // Di bawah 0.5 berarti kita melewatkan I/O; jauh di atas 2 berarti kita
     // menjumlahkan instance ganda (mis. _Total).
     let ok = (0.5..=2.0).contains(&ratio);
-    println!("  {}", if ok { "LULUS" } else { "GAGAL" });
+    println!("  {}", if ok { "PASS" } else { "FAIL" });
     Ok(ok)
 }
 
@@ -1181,12 +1380,12 @@ fn check(values: &[f64], threshold: f64) -> bool {
 
 fn report(label: &str, values: &[f64], threshold: f64) {
     if values.is_empty() {
-        println!("{label:<18} tidak ada sampel");
+        println!("{label:<18} no samples");
         return;
     }
     let max = values.iter().cloned().fold(0.0f64, f64::max);
     let avg = values.iter().sum::<f64>() / values.len() as f64;
-    let status = if max <= threshold { "LULUS" } else { "GAGAL" };
+    let status = if max <= threshold { "PASS" } else { "FAIL" };
     println!(
         "{label:<18} selisih rata-rata {:>5.2}%  maksimum {:>5.2}%  ambang {:>4.0}%  {status}",
         avg * 100.0,
@@ -1213,7 +1412,7 @@ fn compare(seconds: u64) -> anyhow::Result<()> {
 
     let mut collector = Collector::new();
     let _ = collector.sample();
-    let mut prev = system_times().ok_or_else(|| anyhow::anyhow!("GetSystemTimes gagal"))?;
+    let mut prev = system_times().ok_or_else(|| anyhow::anyhow!("GetSystemTimes failed"))?;
 
     let mut diffs = Vec::new();
     println!(
@@ -1223,7 +1422,7 @@ fn compare(seconds: u64) -> anyhow::Result<()> {
     for i in 1..=seconds.max(1) {
         std::thread::sleep(Duration::from_secs(1));
         let snap = collector.sample();
-        let now = system_times().ok_or_else(|| anyhow::anyhow!("GetSystemTimes gagal"))?;
+        let now = system_times().ok_or_else(|| anyhow::anyhow!("GetSystemTimes failed"))?;
 
         let d_idle = now.0.saturating_sub(prev.0) as f64;
         let d_kernel = now.1.saturating_sub(prev.1) as f64;
@@ -1247,11 +1446,11 @@ fn compare(seconds: u64) -> anyhow::Result<()> {
     let max = diffs.iter().cloned().fold(0.0f64, f64::max);
     println!("\nselisih rata-rata: {avg:.2}%  maksimum: {max:.2}%");
     if max <= 2.0 {
-        println!("G0 CPU: LULUS (<= 2%)");
+        println!("G0 CPU: PASS (<= 2%)");
     } else if max <= 5.0 {
         println!("G0 CPU: marginal (2-5%), perlu investigasi");
     } else {
-        println!("G0 CPU: GAGAL (> 5%)");
+        println!("G0 CPU: FAIL (> 5%)");
     }
     Ok(())
 }

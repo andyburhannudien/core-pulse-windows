@@ -77,7 +77,7 @@ impl SensorProvider for SmartProvider {
             }
             Err(OpenError::AccessDenied) => Availability::NeedsElevation,
             Err(OpenError::NotFound) => {
-                Availability::NotAvailable("tidak ada \\\\.\\PhysicalDrive0")
+                Availability::NotAvailable("no \\\\.\\PhysicalDrive0 present".into())
             }
             Err(OpenError::Other(msg)) => Availability::Failed(msg),
         }
@@ -93,7 +93,7 @@ impl SensorProvider for SmartProvider {
                 Err(OpenError::NotFound) => continue,
                 Err(OpenError::AccessDenied) => {
                     self.elevation_denied = true;
-                    return Err("butuh hak administrator untuk membaca SMART".into());
+                    return Err("administrator rights are required to read SMART".into());
                 }
                 Err(OpenError::Other(msg)) => {
                     self.last_error = Some(msg);
@@ -128,7 +128,7 @@ impl SensorProvider for SmartProvider {
         }
 
         if self.targets.is_empty() {
-            return Err("tidak ada disk yang menjawab SMART".into());
+            return Err("no disk answered SMART".into());
         }
         Ok(())
     }

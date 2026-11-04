@@ -117,7 +117,7 @@ impl Collector {
         host_degraded.push(Degradation {
             area: crate::model::Area::Processes,
             reason: DegradeReason::NeedsElevation,
-            detail: "disk/jaringan per proses butuh ETW (helper, P4)".into(),
+            detail: "per-process disk/network needs ETW (helper)".into(),
         });
 
         Self {
@@ -276,9 +276,9 @@ fn build_sessions(processes: &[crate::model::ProcessRow]) -> Vec<SessionRow> {
         .map(|mut s| {
             s.cpu_percent = s.cpu_percent.clamp(0.0, 100.0);
             s.state = if s.session_id == 0 {
-                "Layanan".to_string()
+                "Services".to_string()
             } else {
-                "Aktif".to_string()
+                "Active".to_string()
             };
             s
         })

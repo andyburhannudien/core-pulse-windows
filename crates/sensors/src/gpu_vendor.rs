@@ -52,7 +52,7 @@ impl SensorProvider for GpuVendorProvider {
     fn probe(&self) -> Availability {
         if find_dll("nvml.dll").is_none() && find_dll("igcl.dll").is_none() {
             return Availability::NotAvailable(
-                "tidak ada nvml.dll maupun igcl.dll; suhu GPU tidak bisa dibaca tanpa SDK vendor",
+                "neither nvml.dll nor igcl.dll found; GPU temperature needs a vendor SDK".into(),
             );
         }
         Availability::Available
@@ -66,7 +66,7 @@ impl SensorProvider for GpuVendorProvider {
                     self.nvml = Some(nvml);
                 }
                 Err(e) => {
-                    tracing::warn!(error = %e, "NVML gagal dimuat");
+                    tracing::warn!(error = %e, "NVML failed to load");
                     self.last_error = Some(e);
                 }
             }
@@ -78,7 +78,7 @@ impl SensorProvider for GpuVendorProvider {
                     self.igcl = Some(igcl);
                 }
                 Err(e) => {
-                    tracing::warn!(error = %e, "IGCL gagal dimuat");
+                    tracing::warn!(error = %e, "IGCL failed to load");
                     self.last_error = Some(e);
                 }
             }
@@ -88,7 +88,7 @@ impl SensorProvider for GpuVendorProvider {
             return Err(self
                 .last_error
                 .clone()
-                .unwrap_or_else(|| "tidak ada backend GPU yang bisa dimuat".into()));
+                .unwrap_or_else(|| "no GPU backend could be loaded".into()));
         }
         Ok(())
     }
@@ -199,7 +199,7 @@ impl Nvml {
                 .map_err(|e| format!("nvmlDeviceGetName: {e}"))?;
 
             if init() != NVML_SUCCESS {
-                return Err("nvmlInit mengembalikan error".into());
+                return Err("nvmlInit returned an error".into());
             }
 
             Ok(Self {
@@ -298,7 +298,7 @@ impl Igcl {
                 b"ctlInit\0",
             )
         }
-        .map_err(|e| format!("ctlInit tidak ada: {e}"))?;
+        .map_err(|e| format!("ctlInit missing: {e}"))?;
 
         let mut api_handle: *mut c_void = std::ptr::null_mut();
         let mut version: u32 = 0;
@@ -309,7 +309,7 @@ impl Igcl {
             // SAFETY: out-param valid.
             let rc2 = unsafe { (*init)(version, std::ptr::null_mut(), &mut api_handle) };
             if rc2 != 0 {
-                return Err(format!("ctlInit gagal (rc {rc}, lalu {rc2})"));
+                return Err(format!("ctlInit failed (rc {rc}, then {rc2})"));
             }
         }
 

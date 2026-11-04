@@ -74,7 +74,7 @@ impl SensorProvider for LhmBridgeProvider {
             Availability::Available
         } else {
             Availability::NotAvailable(
-                "LibreHardwareMonitor tidak berjalan di 127.0.0.1:8085 (fitur opt-in)",
+                "LibreHardwareMonitor is not running on 127.0.0.1:8085 (opt-in feature)".into(),
             )
         }
     }
@@ -82,7 +82,7 @@ impl SensorProvider for LhmBridgeProvider {
     fn init(&mut self) -> Result<(), String> {
         self.available = Self::reachable();
         if !self.available {
-            return Err("LHM tidak bisa dihubungi".into());
+            return Err("LHM is unreachable".into());
         }
         Ok(())
     }
@@ -131,7 +131,7 @@ fn fetch_and_parse() -> Result<Vec<SensorReading>, String> {
             .map_err(|e| format!("baca body: {e}"))?;
     }
     if body.len() > MAX_BYTES {
-        return Err("respons melebihi 2 MB".into());
+        return Err("response exceeded 2 MB".into());
     }
 
     let root: LhmNode = serde_json::from_str(&body).map_err(|e| format!("JSON: {e}"))?;

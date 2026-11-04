@@ -17,7 +17,7 @@ pub fn collect() -> (HostInfo, Vec<Degradation>) {
         degraded.push(Degradation {
             area: crate::model::Area::Host,
             reason: crate::model::DegradeReason::ApiFailed,
-            detail: "nama CPU tidak terbaca dari registry".into(),
+            detail: "CPU name could not be read from the registry".into(),
         });
     }
 

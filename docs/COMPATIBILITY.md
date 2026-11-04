@@ -1,117 +1,123 @@
-# Kompatibilitas
+# Compatibility
 
-Dokumen ini menyatakan apa yang **didukung**, apa yang **best effort**, dan apa
-yang **tidak akan pernah** berjalan. Tujuannya supaya tidak ada klaim berlebihan
-di README.
+This document states what is **supported**, what is **best effort**, and what
+will **never** work. The point is to keep the README from over-claiming.
 
-## 1. Sistem operasi
+## 1. Operating systems
 
-| Versi | Status | Catatan |
+| Version | Status | Note |
 |---|---|---|
-| Windows 11 24H2+ (build 26100+) | **Didukung penuh** | target pengembangan |
-| Windows 11 21H2–23H2 | Didukung | `NtQuerySystemInformation` sama |
-| Windows 10 1809–22H2 | Didukung | beberapa counter PDH GPU berbeda nama |
-| Windows Server 2019/2022 | Best effort | tidak diuji, tapi API-nya sama |
-| Windows 8.1 / 7 | **Tidak didukung** | butuh API yang tidak ada; jangan dipaksa |
-| Windows on ARM | **Tidak didukung** di v1 | butuh build `aarch64-pc-windows-msvc` dan uji terpisah |
+| Windows 11 24H2+ (build 26100+) | **Fully supported** | development target |
+| Windows 11 21H2–23H2 | Supported | same `NtQuerySystemInformation` |
+| Windows 10 1809–22H2 | Supported | some PDH GPU counters have different names |
+| Windows Server 2019/2022 | Best effort | untested, but the APIs match |
+| Windows 8.1 / 7 | **Not supported** | required APIs are missing; do not force it |
+| Windows on ARM | **Not supported** in v1 | needs an `aarch64-pc-windows-msvc` build and separate testing |
 
-Arsitektur: `x86_64` saja di v1. Build 32-bit tidak masuk akal untuk aplikasi ini
-(keterbatasan handle dan alamat), dan ARM64 ditunda sampai ada hardware untuk
-menguji.
+Architecture: `x86_64` only in v1. A 32-bit build makes no sense for this
+application (handle and address-space limits), and ARM64 is deferred until there
+is hardware to test on.
 
-## 2. Fitur per jenis mesin
+## 2. Features by machine type
 
-Kolom "mesin ini" merujuk pada mesin pengembangan yang diaudit di
+The "this machine" column refers to the audited development machine in
 [ENVIRONMENT-AUDIT.md](ENVIRONMENT-AUDIT.md).
 
-| Fitur | Desktop/laptop modern | Mesin ini | Syarat |
+| Feature | Modern desktop/laptop | This machine | Requirement |
 |---|---|---|---|
-| Daftar proses + CPU/RAM | ya | **ya** | — |
-| Per-core CPU + frekuensi | ya | **ya** | `CallNtPowerInformation` |
-| Komposisi memori (standby/modified) | ya | **ya** | `NtQuerySystemInformation` |
-| Disk I/O per volume | ya | **ya** | PDH `PhysicalDisk` |
-| Network I/O per adapter | ya | **ya** | `GetIfTable2` |
-| GPU utilization per proses | ya | **ya (iGPU)** | PDH `GPU Engine` |
-| GPU utilization per adapter | ya | **ya** | PDH `GPU Adapter Memory` |
-| Signature & publisher | ya | **ya** | `WinVerifyTrust` |
-| Suhu disk SATA | ya, butuh admin | **ya, butuh helper** | `SMART_RCV_DRIVE_DATA` |
-| Suhu disk NVMe | ya, butuh admin | **tidak berlaku** | NVMe health log |
-| Ukuran disk fisik | ya | **estimasi** (butuh admin untuk angka persis) | `IOCTL_DISK_GET_LENGTH_INFO` |
-| Kapasitas memori GPU | ya | **belum** (DXGI, P3) | `IDXGIAdapter3::QueryVideoMemoryInfo` |
-| Nama adapter GPU | ya | **ya, best effort** | registry kelas display |
-| Suhu CPU via ACPI | tergantung firmware | **tidak** (0 thermal zone) | firmware mengekspos TZ |
-| Suhu CPU via MSR | butuh driver | **tidak** | driver ring0 (ditolak v1) |
-| Suhu GPU NVIDIA | ya | tidak berlaku | `nvml.dll` |
-| Suhu GPU Intel | best effort | **belum teruji** | `igcl.dll` |
-| Suhu GPU AMD | best effort | tidak berlaku | `amdadlx64.dll` |
-| Per-proses network (ETW) | butuh admin | **tidak** (non-admin) | ETW kernel-network |
-| Throttle reasons | butuh admin | **tidak** | `Kernel-Processor-Power` ETW |
+| Process list + CPU/RAM | yes | **yes** | — |
+| Per-core CPU + frequency | yes | **yes** | `CallNtPowerInformation` |
+| Memory composition (standby/modified) | yes | **yes** | `NtQuerySystemInformation` |
+| Disk I/O per volume | yes | **yes** | PDH `PhysicalDisk` |
+| Network I/O per adapter | yes | **yes** | `GetIfTable2` |
+| GPU utilization per process | yes | **yes (iGPU)** | PDH `GPU Engine` |
+| GPU utilization per adapter | yes | **yes** | PDH `GPU Adapter Memory` |
+| Signature & publisher | yes | **yes** | `WinVerifyTrust` |
+| SATA disk temperature | yes, needs admin | **yes, needs the helper** | `SMART_RCV_DRIVE_DATA` |
+| NVMe disk temperature | yes, needs admin | **not applicable** | NVMe health log |
+| Physical disk size | yes | **estimated** (exact value needs admin) | `IOCTL_DISK_GET_LENGTH_INFO` |
+| GPU memory capacity | yes | **not yet** (DXGI) | `IDXGIAdapter3::QueryVideoMemoryInfo` |
+| GPU adapter name | yes | **yes, best effort** | display class registry |
+| CPU temperature via ACPI | firmware-dependent | **no** (0 thermal zones) | firmware exposes a TZ |
+| CPU temperature via MSR | needs a driver | **no** | ring-0 driver (rejected for v1) |
+| NVIDIA GPU temperature | yes | not applicable | `nvml.dll` |
+| Intel GPU temperature | best effort | **not verified** | `igcl.dll` |
+| AMD GPU temperature | best effort | not applicable | `amdadlx64.dll` |
+| Per-process network (ETW) | needs admin | **no** (non-admin) | ETW kernel-network |
+| Throttle reasons | needs admin | **no** | `Kernel-Processor-Power` ETW |
 
-## 3. Persyaratan runtime
+## 3. Runtime requirements
 
-| Komponen | Wajib? | Catatan |
+| Component | Required? | Note |
 |---|---|---|
-| Windows 10 1809+ | ya | — |
-| WebView2 | **tidak** | kita pakai egui, bukan WebView |
-| .NET Runtime | **tidak** | murni Rust |
-| Visual C++ Redistributable | **tidak** | MSVC runtime di-link statis (`+crt-static`) |
-| OpenGL 3.3 (driver GPU) | **ya** | renderer `glow`; `wgpu` gagal render di iGPU UHD 630 mesin uji |
-| Hak administrator | tidak untuk UI | hanya untuk helper |
-| Ruang disk | ~40 MB | biner + riwayat |
+| Windows 10 1809+ | yes | — |
+| WebView2 | **no** | we use egui, not a WebView |
+| .NET Runtime | **no** | pure Rust |
+| Visual C++ Redistributable | **no** | the MSVC runtime is statically linked (`+crt-static`) |
+| OpenGL 3.3 (GPU driver) | **yes** | `glow` renderer; `wgpu` produced an empty window on this machine's UHD 630 |
+| Administrator rights | not for the UI | only for the helper |
+| Disk space | ~40 MB | binary + history |
 
-Catatan `+crt-static`: ini menghindari kebutuhan redistributable, dengan
-konsekuensi ukuran biner sedikit lebih besar. Sudah diperhitungkan di
-[PERF.md](PERF.md).
+The `+crt-static` note: it avoids a redistributable at the cost of a slightly
+larger binary. That trade-off is accounted for in [PERF.md](PERF.md).
 
-## 4. Interaksi dengan software lain
+## 4. Interaction with other software
 
-| Software | Interaksi |
+| Software | Interaction |
 |---|---|
-| Antivirus | tidak ada driver ring0 → tidak memicu deteksi berbasis vulnerable driver. Proses helper yang di-sign mengurangi false positive. |
-| LibreHardwareMonitor | opsional, dibaca lewat HTTP loopback kalau pengguna mengaktifkan bridge. Kita **tidak** memuat DLL-nya. |
-| HWiNFO | opsional, shared memory, read-only. |
-| HWiNFO/CPU-Z/AIDA | tidak konflik; mereka pakai driver sendiri. |
-| Windows Defender | tidak ada pengecualian folder yang diminta. |
-| RivaTuner/Afterburner | tidak konflik; sama-sama membaca NVML. |
-| Proses anti-cheat (Vanguard, EAC) | kita tidak membaca memori proses lain dan tidak memasang driver → tidak konflik. Ini alasan tambahan menolak driver kernel. |
-| RivaTuner/Afterburner | tidak konflik; sama-sama membaca NVML. |
+| Antivirus | no ring-0 driver, so nothing triggers vulnerable-driver detection. A signed helper reduces false positives further. |
+| LibreHardwareMonitor | optional; read over loopback HTTP only if the user enables the bridge. We never load its DLL. |
+| HWiNFO | optional, shared memory, read-only. |
+| HWiNFO / CPU-Z / AIDA64 | no conflict; they use their own drivers. |
+| Windows Defender | no folder exclusion is requested. |
+| RivaTuner / Afterburner | no conflict; both read NVML. |
+| Anti-cheat processes (Vanguard, EAC) | we do not read other processes' memory and install no driver, so there is no conflict. This is an additional reason to reject a kernel driver. |
 
-## 5. Catatan build dan renderer
+## 5. Build and renderer notes
 
-- Renderer memakai `eframe` fitur `glow` (OpenGL). Build `wgpu` menghasilkan
-  window tanpa isi pada iGPU UHD 630 dengan driver 31.0.101.2135; `glow` berjalan
-  normal. Kalau suatu saat pindah ke `wgpu`, uji ulang di mesin ini.
-- `egui 0.37` memakai API `App::ui(&mut self, ui, frame)` dan
-  `egui::Panel::top/bottom` (bukan `TopBottomPanel`). Contoh di dokumentasi
-  egui versi lama tidak bisa dipakai apa adanya.
+- The renderer is `eframe` with the `glow` feature (OpenGL). A `wgpu` build
+  produced an empty window on the UHD 630 with driver 31.0.101.2135; `glow`
+  works. If we ever move to `wgpu`, retest on this machine.
+- `egui 0.37` uses the `App::ui(&mut self, ui, frame)` API and
+  `egui::Panel::top/bottom` (not `TopBottomPanel`). Examples in older egui
+  documentation cannot be used verbatim.
+- Fonts: Segoe UI and Consolas are loaded from `C:\Windows\Fonts` when present,
+  with the bundled Ubuntu/Hack faces as fallbacks, so the UI still renders on a
+  machine without those files.
 
-## 6. Batasan yang diketahui
-1. **Suhu CPU tidak dijamin ada.** Ini batasan platform, bukan bug. Lihat
-   [SENSORS.md](SENSORS.md).
-2. **Per-proses network butuh ETW + admin.** Tanpa itu kolom disembunyikan.
-3. **Command line proses sistem** sering tidak terbaca meski elevated (proses
-   terproteksi). UI menampilkan alasan, bukan string kosong.
-4. **Ikon proses** bisa lambat pada executable di network share. Ada timeout
-   250 ms dan ikon generik.
-5. **Proses 32-bit dari aplikasi 64-bit** terbaca normal untuk statistik, tapi
-   PEB read untuk command line membutuhkan penanganan `WOW64` tersendiri.
-6. **Counter PDH GPU** bisa kosong di VM atau mesin tanpa WDDM driver yang benar.
-7. **Jumlah proses > 2000** (kasus ekstrem, banyak proses kecil) akan membuat
-   enumerasi melewati budget 50 ms. UI tetap jalan, hanya cadence turun ke 2 detik
-   secara otomatis dan menampilkan indikator.
+## 6. Known limitations
 
-## 7. Matriks uji hardware
+1. **CPU temperature is not guaranteed.** That is a platform limitation, not a
+   bug. See [SENSORS.md](SENSORS.md).
+2. **Per-process network needs ETW + admin.** Without it the column is hidden.
+3. **Command lines of protected system processes** often stay unreadable even
+   when elevated. The UI shows the reason, never an empty string.
+4. **Process 32-bit PEB reads** work for statistics but command-line retrieval
+   needs separate `WOW64` handling.
+5. **PDH GPU counters** can be empty in a VM or on a machine without a proper
+   WDDM driver.
+6. **More than ~2000 processes** (an extreme case, many tiny processes) pushes
+   enumeration past the 50 ms budget. The UI still works; only the cadence drops
+   to 2 seconds and an indicator appears.
+7. **Helper required for SMART.** Without an elevated helper, disk temperature
+   is reported as `needs elevation`, never as a number.
+8. **No history persistence yet.** The Alerts tab keeps events in memory for the
+   current session; SQLite history is designed but not implemented.
+9. **Single instance is not enforced.** Two UI windows can run; both talk to the
+   same helper, which serialises requests.
 
-Untuk rilis, minimal harus diuji di:
+## 7. Hardware test matrix
 
-| Konfigurasi | Tujuan |
+For a release, at minimum test on:
+
+| Configuration | Purpose |
 |---|---|
-| Intel + iGPU + HDD SATA (mesin ini) | baseline, non-admin |
-| AMD Ryzen + dGPU NVIDIA + NVMe | NVML, NVMe SMART |
-| Laptop Intel + thermal zone ACPI | Tier 0 berfungsi |
-| Laptop AMD + Radeon iGPU | ADLX best effort |
-| VM (Hyper-V) | memastikan degradasi mulus, bukan crash |
-| Mesin dengan 2 monitor DPI berbeda | layout |
+| Intel + iGPU + SATA HDD (this machine) | baseline, non-admin |
+| AMD Ryzen + NVIDIA dGPU + NVMe | NVML, NVMe SMART |
+| Intel laptop + ACPI thermal zone | Tier 0 works |
+| AMD laptop + Radeon iGPU | ADLX best effort |
+| VM (Hyper-V) | verify graceful degradation, not crashes |
+| Machine with two monitors at different DPI | layout |
 
-Sampai matriks ini terpenuhi, rilis diberi label **beta** dan README menyebutkan
-konfigurasi yang sudah diverifikasi.
+Until this matrix is satisfied, releases are labelled **beta** and the README
+lists the configurations that have actually been verified.

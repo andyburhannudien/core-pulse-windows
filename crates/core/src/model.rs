@@ -67,6 +67,27 @@ impl Snapshot {
     }
 }
 
+/// Compact byte formatting for core-level consumers (alerts, logs, CLI).
+/// The UI has its own richer formatter; this one exists so `core` never has
+/// to format human strings itself.
+pub fn format_bytes(n: u64) -> String {
+    const UNITS: [&str; 6] = ["B", "KB", "MB", "GB", "TB", "PB"];
+    if n < 1024 {
+        return format!("{n} B");
+    }
+    let mut value = n as f64;
+    let mut unit = 0usize;
+    while value >= 1024.0 && unit < UNITS.len() - 1 {
+        value /= 1024.0;
+        unit += 1;
+    }
+    if value >= 100.0 {
+        format!("{value:.0} {}", UNITS[unit])
+    } else {
+        format!("{value:.1} {}", UNITS[unit])
+    }
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct HostInfo {
     pub computer_name: String,
@@ -365,13 +386,13 @@ impl ServiceRunState {
 
     pub fn label(self) -> &'static str {
         match self {
-            Self::Stopped => "Berhenti",
-            Self::StartPending => "Mulai…",
-            Self::StopPending => "Berhenti…",
-            Self::Running => "Berjalan",
-            Self::ContinuePending => "Lanjut…",
-            Self::PausePending => "Jeda…",
-            Self::Paused => "Dijeda",
+            Self::Stopped => "Stopped",
+            Self::StartPending => "Starting…",
+            Self::StopPending => "Stopping…",
+            Self::Running => "Running",
+            Self::ContinuePending => "Resuming…",
+            Self::PausePending => "Pausing…",
+            Self::Paused => "Paused",
             Self::Unknown => "—",
         }
     }
@@ -409,10 +430,10 @@ impl ServiceStartType {
         match self {
             Self::Boot => "Boot",
             Self::System => "System",
-            Self::Auto => "Otomatis",
-            Self::AutoDelayed => "Otomatis (tertunda)",
+            Self::Auto => "Automatic",
+            Self::AutoDelayed => "Automatic (delayed)",
             Self::Manual => "Manual",
-            Self::Disabled => "Nonaktif",
+            Self::Disabled => "Disabled",
             Self::Unknown => "—",
         }
     }
@@ -448,7 +469,7 @@ impl StartupSource {
         match self {
             Self::RegistryMachine => "HKLM\\Run",
             Self::RegistryUser => "HKCU\\Run",
-            Self::StartupFolder => "Folder Startup",
+            Self::StartupFolder => "Startup folder",
             Self::ScheduledTask => "Task Scheduler",
         }
     }

@@ -1,24 +1,25 @@
-# Model data
+# Data model
 
-Semua tipe di sini berada di `core-pulse-core::model` dan dipakai bersama oleh
-UI, CLI, dan helper (lewat `serde`). Skema adalah **kontrak**: `core-pulse-cli --json`
-dipakai orang lain, jadi perubahan yang memutus kompatibilitas wajib menaikkan
-`SCHEMA_VERSION` dan didokumentasikan di [CHANGELOG-SCHEMA](DATA-MODEL.md#changelog-skema).
+Every type here lives in `core-pulse-core::model` and is shared by the UI, the
+CLI, and the helper (through `serde`). The schema is a **contract**:
+`core-pulse-cli --json` is consumed by other tools, so a breaking change must
+raise `SCHEMA_VERSION` and be documented in the
+[changelog](DATA-MODEL.md#schema-changelog).
 
-## 1. Konvensi satuan
+## 1. Unit conventions
 
-| Tipe data | Satuan | Tipe Rust | Catatan |
+| Data | Unit | Rust type | Note |
 |---|---|---|---|
-| Ukuran | byte | `u64` | jangan pakai `f64`, presisi hilang di atas 8 PiB |
-| Persentase | 0–100 | `f32` | bukan 0.0–1.0; UI membulatkan sendiri |
-| Durasi | milidetik | `u64` | CPU time, response time |
-| Timestamp | unix ms | `u64` | UTC, bukan local |
-| Suhu | °C | `f32` | bisa negatif |
-| Frekuensi | MHz | `u32` | — |
-| Rate | byte/detik | `u64` | — |
+| Size | byte | `u64` | do not use `f64`; precision is lost above 8 PiB |
+| Percentage | 0–100 | `f32` | not 0.0–1.0; the UI rounds |
+| Duration | millisecond | `u64` | CPU time, response time |
+| Timestamp | unix ms | `u64` | UTC, not local |
+| Temperature | °C | `f32` | may be negative |
+| Frequency | MHz | `u32` | — |
+| Rate | byte/second | `u64` | — |
 
-**`Option::None` berarti "tidak diketahui".** `0` berarti nilai nol yang benar.
-Ini aturan paling penting di dokumen ini; UI dan CLI wajib membedakannya.
+**`Option::None` means "unknown".** `0` means a true zero. This is the most
+important rule in this document; the UI and CLI must distinguish them.
 
 ## 2. `Snapshot`
 
@@ -27,10 +28,10 @@ pub const SCHEMA_VERSION: u16 = 1;
 
 pub struct Snapshot {
     pub schema: u16,
-    /// Naik 1 setiap snapshot baru. UI memakai ini untuk mendeteksi data segar.
+    /// Incremented for each new snapshot. The UI uses it to detect fresh data.
     pub seq: u64,
     pub ts_unix_ms: u64,
-    /// Interval sampling sebenarnya, bukan yang diminta. Dipakai untuk delta.
+    /// Actual sampling interval, not the requested one. Used for deltas.
     pub interval_ms: u32,
     pub host: HostInfo,
     pub cpu: CpuData,
@@ -40,13 +41,23 @@ pub struct Snapshot {
     pub net: Vec<NetData>,
     pub gpus: Vec<GpuData>,
     pub processes: Vec<ProcessRow>,
-    /// Bagian yang gagal dibaca pada snapshot ini.
+    /// Services/startup/sessions refresh every 15 s on their own thread, so
+    /// these may be empty in the first snapshots.
+    pub services: Vec<ServiceRow>,
+    pub startup: Vec<StartupEntry>,
+    pub sessions: Vec<SessionRow>,
+    /// Latest sensor readings. Empty means no source is available — not that
+    /// every temperature is zero.
+    pub sensors: Vec<SensorReading>,
+    /// Availability of each sensor provider.
+    pub sensor_status: Vec<SensorStatus>,
+    /// Part of the data that failed to read in this snapshot.
     pub degraded: Vec<Degradation>,
 }
 ```
 
-`Snapshot` bersifat immutable dan dibagikan lewat `ArcSwap`. Tidak ada `Mutex`
-di jalur render.
+`Snapshot` is immutable and shared through `ArcSwap`. There is no `Mutex` on the
+render path.
 
 ### `HostInfo`
 
@@ -271,10 +282,11 @@ UI memetakan `NeedsElevation` → "Butuh hak administrator (pasang helper)",
 `NotAvailable` → "Tidak tersedia di perangkat ini". Dua kalimat berbeda karena
 tindakan pengguna berbeda.
 
-## 3. Sensor
+## 3. Sensors
 
 ```rust
-pub struct SensorReading {    pub id: String,               // stabil: "cpu.package", "disk.0.temp"
+pub struct SensorReading {
+    pub id: String,               // stable: "cpu.package", "disk.0.temp"
     pub kind: SensorKind,         // Temperature, Fan, Voltage, Power, Clock, Load
     pub label: String,            // "CPU Package", "ST1000LM049 Temperature"
     pub value: f32,
@@ -285,31 +297,90 @@ pub struct SensorReading {    pub id: String,               // stabil: "cpu.pack
     pub source: SensorSource,
     pub confidence: Confidence,
     pub ts_unix_ms: u64,
+    /// `Some` when the reading comes from a physical disk
+    /// (index of `PhysicalDriveN`). Used to group sensors per disk.
+    pub disk_index: Option<u32>,
 }
 
 pub enum SensorSource {
     Acpi,       // MSAcpi_ThermalZoneTemperature / PDH Thermal Zone
     Pdh,        // Thermal Zone Information counters
-    Smart,      // SMART disk (NVMe health log / ATA attributes)
+    Smart,      // disk SMART (NVMe health log / ATA attributes)
     Nvml,       // NVIDIA
     Igcl,       // Intel Graphics Control Library
     Adlx,       // AMD
     LhmBridge,  // LibreHardwareMonitor web server, opt-in
-    Helper,     // helper kita sendiri
+    Hwinfo,     // HWiNFO shared memory, opt-in
+    Helper,     // our own helper
 }
 
 pub enum Confidence {
-    /// Dibaca langsung dari sensor hardware.
+    /// Read directly from a hardware sensor.
     Direct,
-    /// Diturunkan dari nilai lain (mis. suhu dihitung dari zona ACPI).
+    /// Derived from another value (e.g. an ACPI zone).
     Derived,
-    /// Sumber pihak ketiga, bisa salah kalau versinya beda.
+    /// Third-party source; may be wrong if its version differs.
     ThirdParty,
 }
 ```
 
-`confidence` ada supaya UI bisa menampilkan penanda kecil pada nilai `Derived`
-dan `ThirdParty`. Pengguna berhak tahu angka mana yang benar-benar dari sensor.
+`confidence` exists so the UI can show a small marker on `Derived` and
+`ThirdParty` values. The user is entitled to know which numbers come straight
+from a sensor.
+
+### Provider status
+
+```rust
+pub struct SensorStatus {
+    pub provider: String,           // "acpi-pdh", "smart", "gpu-vendor", "helper"
+    pub availability: SensorAvailability,
+}
+
+pub enum SensorAvailability {
+    Available,
+    NeedsElevation,
+    NotAvailable { reason: String },
+    Failed { error: String },
+}
+```
+
+The distinction between `NeedsElevation` and `NotAvailable` matters: the first
+suggests an action (run the helper), the second does not (the hardware simply
+does not expose the value). The UI never shows the same message for both.
+
+Both `sensors` and `sensor_status` are copied from the sensor thread into every
+`Snapshot`, so the UI reads one consistent view.
+
+### Alerts
+
+```rust
+pub struct Alert {
+    pub key: String,             // stable dedup key, e.g. "cpu", "temp:disk.0.temp"
+    pub kind: AlertKind,         // HighCpu | HighMemory | HighTemperature | LowDiskSpace
+    pub severity: AlertSeverity, // Warning | Critical
+    pub title: String,
+    pub detail: String,
+    pub value: f32,
+    pub threshold: f32,
+    pub since_unix_ms: u64,      // when the condition started being sustained
+    pub ts_unix_ms: u64,         // last evaluation
+}
+
+pub struct AlertEvent {
+    pub alert: Alert,
+    pub change: AlertChange,     // Raised | Cleared
+}
+
+pub struct AlertState {
+    pub active: Vec<Alert>,         // sorted by severity, then title
+    pub recent: Vec<AlertEvent>,    // newest first, at most 20
+}
+```
+
+`AlertState` is published through `ArcSwap` by the sampler thread. It is not
+part of `Snapshot` because alert history must survive snapshot gaps (for example
+when the sensor thread is slow), and because the UI must be able to render it
+without depending on the process table being up to date.
 
 ## 4. Contoh JSON (`core-pulse-cli top --json`)
 

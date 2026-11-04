@@ -1,161 +1,180 @@
-# Strategi testing
+# Testing strategy
 
-Prinsip: **logika yang bisa diuji tanpa Windows harus diuji tanpa Windows**, dan
-logika yang butuh Windows harus diuji dengan fixture yang bisa diputar ulang.
+Principle: **logic that can be tested without Windows should be tested without
+Windows**, and logic that requires Windows should be tested with fixtures that
+can be replayed.
 
-Alasan praktis: mesin pengembangan punya 2 HDD SATA, tanpa NVMe, tanpa GPU
-diskrit, tanpa thermal zone ACPI, dan tanpa hak admin. Kalau test bergantung pada
-hardware itu, separuh kode tidak akan pernah teruji.
+Practical reason: the development machine has two SATA HDDs, no NVMe, no
+discrete GPU, no ACPI thermal zone, and runs without admin rights. If tests
+depended on that hardware, half the code would never be exercised.
 
-## 1. Piramida
+## 1. The pyramid
 
 ```
         /\
-       /  \      manual checklist (paritas vs Task Manager)
-      /────\     integration live (opt-in, butuh mesin nyata)
-     /      \    fixture replay (snapshot & payload rekaman)
-    /────────\   unit test (parser, kalkulasi, state machine)
+       /  \      manual checklist (parity vs Task Manager)
+      /────\     integration live (opt-in, needs a real machine)
+     /      \    fixture replay (recorded snapshots & payloads)
+    /────────\   unit test (parsers, calculations, state machines)
    /──────────\  compile-time (type system, clippy, deny)
 ```
 
-Target kasar: 70% unit, 20% fixture, 10% live/manual. Bukan angka keramat, tapi
-arahnya: jangan mengandalkan test manual untuk hal yang bisa diuji murni.
+Rough target: 70% unit, 20% fixture, 10% live/manual. Not a sacred number, but
+the direction is: do not rely on manual tests for anything that can be tested
+purely.
 
-## 2. Unit test
+**Current count: 167 tests** (core 73, sensors 41 + 3 fixture, ipc 17, helper 9,
+ui 24), plus `clippy --workspace --all-targets` with zero warnings.
 
-Yang **wajib** punya unit test:
+## 2. Unit tests
 
-| Modul | Kasus |
+Things that **must** have unit tests:
+
+| Module | Cases |
 |---|---|
-| `sys::ntapi` parser | buffer terpotong, `NextEntryOffset` 0, nama proses non-UTF8, PID 0 |
-| CPU% kalkulasi | delta waktu 0 (jangan bagi nol), counter wrap, core offline, interval tidak seragam |
-| Memory pressure | batas 0%, 100%, commit > limit, nilai negatif dari API |
-| SMART NVMe | health log 512 byte valid, temperature 0 K, byte terpotong |
-| SMART ATA | atribut 0xC2/0xBE, threshold hilang, nilai 0 (sensor tidak ada) |
-| Signature | path tidak ada, file tanpa signature, signature invalid, cache hit |
-| `Snapshot` serialisasi | round-trip JSON, `None` tetap `null`, `schema` ikut |
-| PID reuse guard | creation time beda 1 ms, 1 detik, sama persis |
-| Alert engine | dedup, cooldown, flapping (naik-turun cepat), nilai kembali normal |
-| Format angka | 1023 B → "1.0 KB", 1 GiB, pembulatan persen, locale |
-| Riwayat SQLite | insert batch, query rentang, retensi, migrasi skema |
+| `sys::ntapi` parser | truncated buffer, `NextEntryOffset` 0, non-UTF8 process name, PID 0 |
+| CPU% calculation | zero time delta (no division by zero), counter wrap, offline core, uneven intervals |
+| Memory pressure | bounds 0% / 100%, commit > limit, negative values from the API |
+| SMART NVMe | valid 512-byte health log, temperature 0 K, truncated bytes |
+| SMART ATA | attributes 0xC2/0xBE, missing threshold, value 0 (sensor absent) |
+| Signature | missing path, unsigned file, invalid signature, cache hit |
+| `Snapshot` serialization | JSON round-trip, `None` stays `null`, `schema` included |
+| PID-reuse guard | creation time differing by 1 ms, by 1 s, identical |
+| Alert engine | dedup, cooldown, flapping, return to normal, missing data never alerts |
+| IPC framing | oversized length rejected, version mismatch, invalid JSON, truncated frame |
+| Helper merge | local wins on collision, implausible value dropped, missing helper is not an error |
+| Number formatting | 1023 B → "1.0 KB", 1 GiB, percentage rounding, middle truncation |
+| Clock formatting | local-offset application, zero padding, civil-date conversion |
+| SQLite history | batch insert, range query, retention, schema migration (when implemented) |
 
-Aturan: setiap bug yang ditemukan di lapangan **wajib** menghasilkan satu unit
-test regresi sebelum diperbaiki. Tanpa itu, bug akan kembali.
+Rule: every bug found in the field **must** produce a regression unit test before
+it is fixed. Otherwise it comes back.
 
 ## 3. Fixture replay
 
-Inti strategi ini. Setiap data dari OS direkam ke file, lalu collector diuji
-dengan memutar rekaman itu.
+This is the heart of the strategy. Data from the OS is recorded to a file, then
+the collector is tested by replaying that recording.
 
 ```
 tests/fixtures/
 ├── snapshot/
-│   ├── win11-26100-idle.json          # 400 proses, mesin ini
-│   ├── win11-26100-load.json          # saat build Rust berjalan
+│   ├── win11-26100-idle.json          # ~400 processes, this machine
+│   ├── win11-26100-load.json          # while a Rust build was running
 │   └── win10-19045-legacy.json
 ├── smart/
-│   ├── nvme-health-samsung-980.bin    # 512 byte log page 0x02
+│   ├── nvme-health-samsung-980.bin    # 512-byte log page 0x02
 │   ├── nvme-health-wd-sn770.bin
 │   ├── ata-attrs-st1000lm049.bin
-│   └── ata-attrs-corrupt.bin          # sengaja rusak, untuk fuzz seed
+│   └── ata-attrs-corrupt.bin          # deliberately corrupt, fuzz seed
 └── ipc/
     ├── sensor-update-v1.json
-    └── malformed/                      # pesan cacat untuk test penolakan
+    └── malformed/                      # malformed messages for rejection tests
 ```
 
-Cara merekam: `core-pulse-cli record --out tests/fixtures/snapshot/x.json`.
-Perintah ini ada di CLI sejak P1, supaya merekam fixture tidak pernah jadi
-pekerjaan manual yang ditunda.
+Recording: `core-pulse-cli record --out tests/fixtures/snapshot/x.json`. That
+command has existed since P1, so recording a fixture is never manual work that
+gets postponed.
 
-Aturan fixture:
+Fixture rules:
 
-- **Anonimisasi**: nama pengguna diganti `user`, nama komputer `PC`, path
-  personal diganti `C:\Users\user\...`. Ada test yang memeriksa fixture tidak
-  memuat nama asli.
-- **Kecil**: satu snapshot ~400 proses ≈ 200 KB JSON; kompres dengan `zstd` kalau
-  perlu, tapi jangan lebih dari 2 MB per file.
-- **Berversi**: fixture menyimpan `schema` sehingga migrasi bisa diuji.
+- **Anonymised**: user names become `user`, computer names `PC`, personal paths
+  `C:\Users\user\...`. A test asserts that no fixture contains the real name.
+- **Small**: one snapshot with ~400 processes is ≈200 KB of JSON; compress with
+  `zstd` if needed, but never exceed 2 MB per file.
+- **Versioned**: the fixture stores `schema` so migrations can be tested.
 
-## 4. Test live (opt-in)
+## 4. Live / opt-in tests
 
-Test yang menyentuh mesin sungguhan diberi atribut `#[ignore]` atau digerbangi
-variabel lingkungan, supaya `cargo test` biasa tetap deterministik:
+Tests that touch the real machine are gated so a plain `cargo test` stays
+deterministic. In this repository the live checks are implemented as **CLI
+subcommands** rather than `#[ignore]` tests, because they need to spawn helper
+processes and print evidence:
 
 ```powershell
-$env:CORE_PULSE_LIVE = "1"; cargo test --features live -- --ignored
+# PID-reuse guard against real processes (spawns and kills a test process)
+.\target\release\core-pulse-cli.exe action-selftest
+
+# Helper end-to-end: spawn, oversized frame, invalid JSON, helper death
+.\target\release\core-pulse-cli.exe helper-selftest
+
+# Sensor reality check on this machine
+.\target\release\core-pulse-cli.exe sensors --helper --samples 2
 ```
 
-Yang diuji live:
+What the live checks cover:
 
-- Enumerasi proses mengembalikan > 0 dan mengandung PID 4.
-- Total CPU% dalam rentang 0–100 × jumlah core.
-- Suhu disk (kalau ada disk yang bisa dibaca) dalam rentang -10..90 °C.
-- Helper: install → connect → data → uninstall, tanpa sisa service.
-- UI smoke test: buka, tunggu 3 detik, tutup, exit code 0.
+- The process enumeration returns > 0 entries and includes PID 4.
+- Total CPU% stays within 0–100 × core count.
+- Disk temperature, when readable, is within -10..90 °C.
+- The helper starts, answers `Hello`, survives malformed input, and its death is
+  detected as `NotRunning`.
+- The UI opens, renders, and exits with code 0 (manual, via screenshot).
 
 ## 5. Fuzz
 
-Target `cargo fuzz`:
+`cargo fuzz` targets:
 
-| Target | Input | Tujuan |
+| Target | Input | Goal |
 |---|---|---|
-| `nvme_log` | byte acak | tidak panic, tidak OOB |
-| `ata_attrs` | byte acak | sama |
-| `ipc_message` | byte acak | ditolak dengan error, bukan panic |
-| `lhm_json` | JSON acak | parser tidak panik, tidak alokasi liar |
+| `nvme_log` | random bytes | no panic, no out-of-bounds |
+| `ata_attrs` | random bytes | same |
+| `ipc_message` | random bytes | rejected with an error, never a panic |
+| `lhm_json` | random JSON | parser does not panic or allocate wildly |
 
-Jalankan 10 menit di CI nightly, dan simpan corpus yang ditemukan ke
-`tests/fixtures/fuzz-corpus/` agar regresi tertangkap.
+Run for 10 minutes in nightly CI, and keep any discovered corpus under
+`tests/fixtures/fuzz-corpus/` so regressions are caught.
 
-## 6. Checklist manual (paritas vs Task Manager)
+## 6. Manual checklist (parity vs Task Manager)
 
-Dijalankan sebelum setiap gate P1 dan sebelum rilis. Ini satu-satunya cara
-memverifikasi "angkanya benar".
+Run before every P-gate and before a release. This is the only way to verify
+"the numbers are right".
 
-| # | Langkah | Ekspektasi |
+| # | Step | Expectation |
 |---|---|---|
-| 1 | Buka Task Manager dan core-pulse berdampingan, tab Processes | jumlah proses sama |
-| 2 | Urutkan CPU descending, diamkan 60 detik | urutan 5 teratas sama, selisih < 5% |
-| 3 | Buka 5 tab Chrome baru | chrome.exe naik di keduanya, selisih < 10% |
-| 4 | Copy file 2 GB | kolom Disk dan tab Performance mengikuti |
-| 5 | Unduh file besar | kolom Network mengikuti |
-| 6 | Putar video 4K | kolom GPU muncul dan masuk akal |
-| 7 | Buka tab Performance → Memory | in use/standby/free cocok |
-| 8 | End task Notepad | hilang dari keduanya |
-| 9 | Jalankan proses sebagai admin | kolom elevated benar |
-| 10 | Cabut/colok USB drive | volume muncul/hilang tanpa crash |
-| 11 | Biarkan 30 menit idle | CPU < 1%, RAM stabil (tidak naik terus) |
-| 12 | Matikan helper saat berjalan | UI tidak hang, status berubah |
-| 13 | Ubah DPI ke 150% | layout tidak terpotong |
-| 14 | Ganti tema terang/gelap | kontras teks tetap terbaca |
-| 15 | Sleep lalu resume | sampling pulih, tidak ada lonjakan palsu |
+| 1 | Open Task Manager and core-pulse side by side, Processes tab | same process count |
+| 2 | Sort by CPU descending, wait 60 s | same top five, difference < 5% |
+| 3 | Open five Chrome tabs | chrome.exe rises in both, difference < 10% |
+| 4 | Copy a 2 GB file | Disk column and Performance tab follow |
+| 5 | Download a large file | Network column follows |
+| 6 | Play a 4K video | GPU column appears and is plausible |
+| 7 | Performance → Memory | in use / standby / free match |
+| 8 | End task on Notepad | disappears from both |
+| 9 | Start a process as admin | elevated column is correct |
+| 10 | Unplug/replug a USB drive | volume appears/disappears without a crash |
+| 11 | Leave idle for 30 minutes | CPU < 1%, RAM stable (no leak) |
+| 12 | Kill the helper while running | UI does not hang, status changes |
+| 13 | Set DPI to 150% | layout is not clipped |
+| 14 | Switch light/dark theme | text contrast stays readable |
+| 15 | Sleep then resume | sampling recovers, no phantom spike |
+| 16 | Send an oversized IPC frame | helper rejects it and keeps serving |
+| 17 | Send invalid JSON over the pipe | helper rejects it and keeps serving |
 
-Poin 15 penting: setelah resume, delta waktu bisa besar dan menghasilkan lonjakan
-CPU% palsu. Collector wajib mendeteksi lompatan `interval_ms` > 5 detik dan
-membuang sampel pertama.
+Item 15 matters: after resume the time delta can be large and produce a phantom
+CPU% spike. The collector must detect an `interval_ms` jump over 5 seconds and
+discard that sample.
 
 ## 7. CI
 
 ```yaml
-# .github/workflows/ci.yml (ringkas)
+# .github/workflows/ci.yml (outline)
 jobs:
-  check:      # windows-latest: fmt, clippy -D warnings, nextest, deny
-  bench:      # windows-latest: criterion, bandingkan dengan baseline
-  coverage:   # tarpaulin/llvm-cov, target 65% untuk core+sensors
-  fuzz:       # nightly, 10 menit per target
-  build:      # release build, ukur ukuran exe, upload artifact
+  check:      # windows-latest: fmt, clippy -D warnings, tests, deny
+  bench:      # windows-latest: criterion, compare against baseline
+  coverage:   # tarpaulin/llvm-cov, target 65% for core+sensors
+  fuzz:       # nightly, 10 minutes per target
+  build:      # release build, measure exe size, upload artifact
 ```
 
-Gate merge: `check` hijau + tidak ada regresi benchmark > 20% + coverage tidak
-turun lebih dari 2 poin.
+Merge gate: `check` green + no benchmark regression > 20% + coverage not down
+by more than 2 points.
 
-## 8. Kebijakan test flaky
+## 8. Flaky-test policy
 
-Test flaky lebih buruk daripada tidak ada test, karena melatih orang mengabaikan
-kegagalan.
+A flaky test is worse than no test, because it trains people to ignore failures.
 
-- Test yang gagal intermiten diberi label `flaky` dan **dikarantina** dalam 48 jam.
-- Kalau penyebabnya timing, ganti dengan sinkronisasi eksplisit, bukan `sleep`.
-- Kalau penyebabnya hardware, pindahkan ke kategori live (opt-in).
-- Test yang dikarantina lebih dari 2 minggu dihapus atau diperbaiki — tidak
-  dibiarkan menggantung.
+- An intermittently failing test is labelled `flaky` and **quarantined** within
+  48 hours.
+- If the cause is timing, replace it with explicit synchronisation, not `sleep`.
+- If the cause is hardware, move it to the live (opt-in) category.
+- A test quarantined for more than two weeks is deleted or fixed — never left
+  hanging.

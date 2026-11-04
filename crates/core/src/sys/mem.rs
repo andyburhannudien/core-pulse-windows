@@ -32,7 +32,7 @@ pub fn collect() -> (MemoryData, Vec<Degradation>) {
         degraded.push(Degradation {
             area: crate::model::Area::Memory,
             reason: crate::model::DegradeReason::ApiFailed,
-            detail: "GlobalMemoryStatusEx gagal".into(),
+            detail: "GlobalMemoryStatusEx failed".into(),
         });
         return (MemoryData::default(), degraded);
     }
@@ -92,8 +92,8 @@ pub fn collect() -> (MemoryData, Vec<Degradation>) {
             degraded.push(Degradation {
                 area: crate::model::Area::Memory,
                 reason: crate::model::DegradeReason::NotAvailable,
-                detail: "komposisi memori (standby/modified) tidak tersedia; \
-                         hanya total dan available yang diisi"
+                detail: "memory composition (standby/modified) unavailable; \
+                         only total and available are filled in"
                     .into(),
             });
             data.in_use_bytes = data.total_bytes.saturating_sub(data.available_bytes);

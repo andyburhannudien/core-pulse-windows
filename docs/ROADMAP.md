@@ -15,7 +15,8 @@ diaudit (lihat [ENVIRONMENT-AUDIT.md](ENVIRONMENT-AUDIT.md)).
 | ~~P1~~ | ~~Paritas Task Manager (proses + performance)~~ | ~~1–1,5 minggu~~ | **G1 LULUS** — [P1-RESULTS.md](P1-RESULTS.md) |
 | ~~P2~~ | ~~Aksi proses + tab Services/Startup/Users/Details~~ | ~~1 minggu~~ | **G2 LULUS** — [P2-RESULTS.md](P2-RESULTS.md) |
 | P3 | Sensor framework + SMART + GPU + dashboard | 1–1,5 minggu | **G3 sebagian** — [P3-RESULTS.md](P3-RESULTS.md) |
-| P4 | Helper elevated + alert + riwayat + tray | 1 minggu | G4: helper mati → UI tetap benar |
+| ~~P4~~ | ~~Helper + alert + UI~~ | ~~1 minggu~~ | **G4 LULUS (non-admin)** — [P4-RESULTS.md](P4-RESULTS.md) |
+| P4b | Riwayat SQLite + tray + single instance | 3–4 hari | belum ada gate |
 | P5 | Installer, docs pengguna, CI lengkap | 3–5 hari | G5: install di mesin bersih tanpa admin |
 
 Total: **5–6 minggu** sampai v1.0 yang bisa dipakai harian.
@@ -149,21 +150,33 @@ Yang dibangun:
 | Parser NVMe/ATA teruji | LULUS — fixture → 44,85 °C / 41 °C |
 | Satu siklus provider | LULUS — p95 40 ms (di thread terpisah) |
 
-## P4 — Helper, alert, riwayat (1 minggu)
+## P4 — Helper, alerts, history (1 week) — **PARTIAL**
 
-- Helper sebagai Windows Service, install/uninstall lewat `--install-service`
-  dengan elevasi, protokol named pipe read-only berversi.
-- Alert engine (dedup + cooldown), notifikasi toast + baris di UI.
-- Riwayat SQLite: agregasi 1 menit, retensi 30 hari, query "apa yang berat
-  kemarin jam 3".
-- Tray icon, start minimized, single instance, global hotkey.
+Done:
+
+- Helper as a Windows Service, install/uninstall via `--install-service` with
+  elevation, versioned read-only named-pipe protocol.
+- Alert engine (sustained thresholds, dedup, cooldown) plus an in-UI banner and
+  a dedicated tab.
+- UI rework: navigation rail, command bar, status strip, English throughout.
+
+Still open:
+
+- SQLite history: 1-minute aggregation, 30-day retention, "what was heavy
+  yesterday at 3" query (ADR-0006 is written, implementation is not).
+- Tray icon, start minimised, single instance, global hotkey.
+- Elevated helper verification (needs a manual UAC approval).
+
+Results and evidence: [P4-RESULTS.md](P4-RESULTS.md).
 
 **Gate G4:**
 
-- Helper dimatikan di tengah jalan → UI tidak hang, kolom berubah ke
-  "Butuh helper" dalam < 2 detik, reconnect otomatis saat helper hidup lagi.
-- Pipe menolak pesan > 1 MB dan JSON yang tidak valid tanpa crash.
-- Aplikasi berjalan normal (tanpa fitur elevated) di akun non-admin.
+- Helper killed mid-run → UI does not hang, status becomes "needs helper" in
+  < 2 s, reconnects automatically when the helper returns. **PASS** (death
+  detected in 0 ms).
+- Pipe rejects messages > 1 MB and invalid JSON without crashing. **PASS**.
+- Application runs normally (without elevated features) on a non-admin account.
+  **PASS**.
 
 ## P5 — Polish (3–5 hari)
 

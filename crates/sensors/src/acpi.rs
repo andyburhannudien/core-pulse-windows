@@ -78,18 +78,18 @@ impl SensorProvider for PdhThermalProvider {
 
     fn probe(&self) -> Availability {
         if self.query.is_none() {
-            return Availability::Failed("PdhOpenQueryW gagal".into());
+            return Availability::Failed("PdhOpenQueryW failed".into());
         }
         if self.temperature.is_none() && self.precision.is_none() {
             return Availability::NotAvailable(
-                "counter Thermal Zone Information tidak terdaftar di mesin ini",
+                "Thermal Zone Information counter is not registered on this machine".into(),
             );
         }
         // Counter terdaftar belum tentu punya instance. Kalau `init` sudah
         // menghitung 0, laporkan NotAvailable — bukan "tersedia" lalu diam.
         match self.instances {
             Some(0) => Availability::NotAvailable(
-                "firmware tidak mengekspos ACPI thermal zone (0 instance)",
+                "firmware exposes no ACPI thermal zone (0 instances)".into(),
             ),
             _ => Availability::Available,
         }
@@ -100,7 +100,7 @@ impl SensorProvider for PdhThermalProvider {
         if count == 0 {
             // Bukan error: firmware memang tidak mengekspos thermal zone.
             // Dilaporkan sebagai NotAvailable, bukan Failed.
-            tracing::info!("thermal zone ACPI tidak punya instance di mesin ini");
+            tracing::info!("ACPI thermal zone has no instances on this machine");
         } else {
             tracing::info!(count, "thermal zone ACPI ditemukan");
         }
@@ -145,7 +145,7 @@ impl SensorProvider for PdhThermalProvider {
                     SensorSource::Pdh,
                     Confidence::Derived,
                 ),
-                "zona chassis ACPI, biasanya di bawah suhu die CPU",
+                "ACPI chassis zone, usually below CPU die temperature",
             ));
         }
     }

@@ -1,209 +1,224 @@
 # Threat model
 
-Aplikasi ini membaca informasi sistem dan — dalam mode helper — berjalan dengan
-hak `LocalSystem`. Itu kombinasi yang layak dianalisis, bukan diasumsikan aman.
+This application reads system information and — in helper mode — runs with
+`LocalSystem` rights. That combination deserves analysis, not an assumption of
+safety.
 
-Metodologi: STRIDE ringan per trust boundary, difokuskan pada apa yang benar-benar
-ada di desain (bukan daftar ancaman generik).
+Method: lightweight STRIDE per trust boundary, focused on what the design
+actually contains (not a generic threat checklist).
 
-## 1. Aset
+## 1. Assets
 
-| Aset | Nilai bagi penyerang |
+| Asset | Value to an attacker |
 |---|---|
-| Proses `core-pulse-helper.exe` (LocalSystem) | eksekusi kode sebagai SYSTEM → eskalasi penuh |
-| Named pipe `\\.\pipe\core-pulse-v1` | titik masuk ke proses berhak tinggi |
-| Database riwayat | kebiasaan pengguna, nama proses, waktu aktif (privasi) |
-| Log | path, nama pengguna, kadang command line |
-| Integritas angka yang ditampilkan | keputusan pengguna (mis. mematikan proses yang salah) |
+| `core-pulse-helper.exe` process (LocalSystem) | code execution as SYSTEM → full escalation |
+| Named pipe `\\.\pipe\core-pulse-v1` | entry point into a high-privilege process |
+| History database | user habits, process names, active hours (privacy) |
+| Logs | paths, user names, occasionally command lines |
+| Integrity of the displayed numbers | user decisions (e.g. ending the wrong process) |
 
-## 2. Trust boundary
+## 2. Trust boundaries
 
 ```
-[ pengguna non-admin ] --pipe--> [ helper LocalSystem ] --IOCTL--> [ kernel/driver ]
+[ non-admin user ] --pipe--> [ helper LocalSystem ] --IOCTL--> [ kernel/driver ]
         │
-        └── [ core-pulse.exe ] --baca--> [ API Windows ]
+        └── [ core-pulse.exe ] --read--> [ Windows API ]
 
-[ pihak ketiga: LHM/HWiNFO ] --HTTP loopback--> [ core-pulse.exe ]
+[ third party: LHM/HWiNFO ] --HTTP loopback--> [ core-pulse.exe ]
 ```
 
-Empat boundary: pipe (rendah → tinggi), syscall (user → kernel), loopback HTTP
-(pihak ketiga → kita), dan supply chain (crates.io → build).
+Four boundaries: pipe (low → high), syscall (user → kernel), loopback HTTP
+(third party → us), and supply chain (crates.io → build).
 
-## 3. Ancaman dan mitigasi
+## 3. Threats and mitigations
 
-### T1 — Proses lain menyamar sebagai helper / klien
+### T1 — Another process impersonating the helper or the client
 
-**Skenario:** malware membuat named pipe dengan nama sama lebih dulu, lalu UI
-terhubung ke sana dan menerima data palsu (mis. semua suhu normal) — atau
-sebaliknya, malware membuat pipe server dan helper kita terhubung sebagai klien.
+**Scenario:** malware creates a named pipe with the same name first, so the UI
+connects to it and accepts forged data (for example, all temperatures normal).
+Or the reverse: malware creates a pipe server and our helper connects to it.
 
-**Mitigasi:**
+**Mitigations (as implemented):**
 
-- Helper membuat pipe dengan `FILE_FLAG_FIRST_PIPE_INSTANCE`, sehingga tidak bisa
-  didahului.
-- UI memverifikasi PID server pipe (`GetNamedPipeServerProcessId`) dan mencocokkan
-  path executable-nya dengan helper yang terpasang, plus memverifikasi tanda
-  tangan biner helper sebelum menerima data.
-- Helper memverifikasi klien lewat impersonation + `GetTokenInformation`, hanya
-  menerima token dengan integrity `Medium`+ dan user yang sama dengan sesi aktif.
-- Kalau verifikasi gagal: UI menampilkan "helper tidak tepercaya" dan **tidak**
-  memakai datanya.
+- The helper creates its first pipe instance with `FILE_FLAG_FIRST_PIPE_INSTANCE`,
+  so it cannot be preceded.
+- The UI verifies the pipe server's PID (`GetNamedPipeServerProcessId`) and
+  compares the server executable path with the expected helper path
+  (`core-pulse-helper.exe`, overridable via `CORE_PULSE_HELPER_PATH`). A
+  mismatch is reported as `HelperError::Untrusted` and the data is discarded.
+- The helper validates the client by resolving the **console session user** via
+  WTS (`WTSQuerySessionInformationW` + `LookupAccountNameW`) and comparing it
+  with the client token's user SID, and requires token integrity `Medium` or
+  higher.
+- If validation fails, the helper closes the connection without replying, so no
+  information leaks to the rejected client.
 
-**Residual risk:** rendah, tapi bergantung pada kualitas verifikasi signature.
-Kalau helper tidak di-sign (build internal), verifikasi diganti dengan
-perbandingan hash biner yang dipasang.
+**Residual risk:** low. The current client check is a path comparison rather
+than a signature check; a build-time hash pin is the P5 hardening step.
 
-### T2 — Pipe sebagai jalur eskalasi hak
+### T2 — The pipe as a privilege-escalation path
 
-**Skenario:** penyerang mengirim perintah ke helper untuk melakukan sesuatu yang
-tidak boleh dilakukan user non-admin (membaca disk, mengubah service, mematikan
-proses sistem).
+**Scenario:** an attacker sends a command to the helper asking it to do
+something a non-admin user may not do (read a disk, modify a service, kill a
+system process).
 
-**Mitigasi desain — protokol sengaja sempit:**
+**Design mitigation — the protocol is deliberately narrow:**
 
-| Pesan | Arah | Efek |
+| Message | Direction | Effect |
 |---|---|---|
-| `Hello { proto_version }` | UI → helper | negosiasi versi |
-| `GetSensors` | UI → helper | baca sensor |
-| `GetSmart { disk_index }` | UI → helper | baca SMART disk tertentu |
-| `SensorUpdate { readings }` | helper → UI | data |
-| `SmartUpdate { disks }` | helper → UI | data |
+| `Hello { proto_version }` | UI → helper | version negotiation |
+| `GetSensors` | UI → helper | read sensors |
+| `GetSmart { disk_index }` | UI → helper | read SMART for one disk |
+| `Hello { .. }` | helper → UI | version + elevated flag |
+| `Sensors { readings, degraded, statuses }` | helper → UI | data |
+| `Smart { disks }` | helper → UI | data |
 | `Error { code, message }` | helper → UI | — |
 
-Tidak ada pesan "jalankan perintah", "baca file", "tulis registry", atau
-"terminate proses". **Helper tidak pernah mengeksekusi apa pun atas permintaan
-klien.** Kalau suatu saat fitur butuh itu, harus lewat ADR baru dengan analisis
-ulang, bukan ditambahkan diam-diam.
+There is no "run command", "read file", "write registry" or "terminate process"
+message. **The helper never executes anything at a client's request.** If a
+future feature needs that, it requires a new ADR and a fresh analysis, not a
+quiet addition.
 
-`disk_index` divalidasi sebagai bilangan bulat dalam rentang disk yang benar-benar
-ada; helper membangun path `\\.\PhysicalDriveN` sendiri, tidak menerima path dari
-klien (mencegah path traversal ke device lain).
+`disk_index` is validated as an integer in the range 0–63; the helper builds the
+`\\.\PhysicalDriveN` path itself and never accepts a path from the client
+(preventing traversal to another device).
 
-### T3 — PID reuse (aksi mengenai proses yang salah)
+The helper also caps each connection at 32 requests, caps a frame at 1 MiB, and
+applies a 2-second read timeout, so a malicious client cannot hold the service
+open or exhaust memory with an oversized frame.
 
-**Skenario:** pengguna menekan "End task" pada PID 4820. Antara render dan aksi,
-proses itu mati dan PID 4820 dipakai proses lain — yang kemudian dimatikan.
+### T3 — PID reuse (acting on the wrong process)
 
-**Mitigasi:**
+**Scenario:** the user presses "End task" on PID 4820. Between render and action
+that process dies and PID 4820 is reused by another process — which then gets
+terminated.
 
-- `ProcessRow` selalu membawa `start_time_unix_ms`.
-- Sebelum `TerminateProcess`, buka handle dengan `OpenProcess`, lalu
-  `GetProcessTimes` dan bandingkan creation time. Kalau beda > 1 detik: batalkan,
-  tampilkan "proses sudah berubah, muat ulang daftar".
-- Handle yang dipakai untuk aksi adalah handle yang diverifikasi — bukan PID
-  yang dibuka ulang.
-- Test otomatis mensimulasikan ini (spawn proses, catat PID, biarkan mati, spawn
-  lagi sampai PID sama, pastikan aksi ditolak).
+**Mitigations:**
 
-Ini bukan mitigasi teoretis: PID reuse adalah penyebab bug nyata di banyak task
-manager.
+- `ProcessRow` always carries `start_time_unix_ms`.
+- Before `TerminateProcess`, open a handle with `OpenProcess`, call
+  `GetProcessTimes` and compare the creation time. If it differs by more than
+  1 second: abort and report that the process changed.
+- The handle used for the action is the verified handle, not a PID reopened
+  later.
+- An automated test simulates this (spawn, record PID, let it die, spawn until
+  the PID repeats, assert the action is refused). `action-selftest` does the
+  same against real processes: 6/6 scenarios pass.
 
-### T4 — Payload SMART berbahaya
+This is not a theoretical mitigation: PID reuse causes real bugs in many task
+managers.
 
-**Skenario:** disk (atau driver/USB adapter) mengembalikan buffer yang panjangnya
-tidak sesuai, offset aneh, atau string tanpa NUL.
+### T4 — Hostile SMART payloads
 
-**Mitigasi:**
+**Scenario:** a disk (or driver/USB adapter) returns a buffer of unexpected
+length, odd offsets, or a string without a NUL terminator.
 
-- Semua parser menerima `&[u8]` dan memvalidasi panjang sebelum indexing; tidak
-  ada `unwrap()` pada slice.
-- Offset NVMe health log dan ATA attribute sudah diverifikasi unit test di
-  `disk-pulse`; port-nya mempertahankan test tersebut.
-- Fuzz target untuk setiap parser (`cargo fuzz run nvme_log`, `ata_attrs`).
-- String dari device di-truncate ke 64 byte dan dibersihkan dari karakter kontrol
-  sebelum ditampilkan atau di-log.
+**Mitigations:**
 
-### T5 — Pesan pipe yang dibuat jahat
+- Every parser takes `&[u8]` and validates length before indexing; there is no
+  `unwrap()` on a slice.
+- NVMe health-log and ATA attribute offsets are covered by unit tests and
+  fixture replay (`tests/fixture_replay.rs`).
+- String fields from the device are truncated and stripped of control
+  characters before display or logging.
 
-**Skenario:** klien mengirim JSON 500 MB, JSON dalam (deeply nested), atau pesan
-tanpa akhir untuk membuat helper kehabisan memori.
+### T5 — Maliciously crafted pipe messages
 
-**Mitigasi:**
+**Scenario:** a client sends 500 MB of JSON, deeply nested JSON, or never-ending
+data to exhaust the helper's memory.
 
-- Header pesan wajib: `u32 length` + `u16 version`; `length > 1 MiB` ditolak
-  sebelum alokasi.
-- `serde_json` dengan batas kedalaman (`disable_recursion_limit` **tidak**
-  dipakai).
-- Timeout baca 2 detik per pesan; koneksi ditutup kalau terlampaui.
-- Maksimum 8 klien bersamaan; klien ke-9 ditolak.
+**Mitigations (as implemented):**
 
-### T6 — Log injection / kebocoran data lewat log
+- The frame header is mandatory: `u32 length` + `u16 proto_version`. A
+  `length > 1 MiB` is rejected **before** allocation; the server then closes the
+  connection without panic.
+- Oversized and malformed frames are covered by `helper-selftest`, which proves
+  the helper keeps serving new clients afterwards.
+- Invalid JSON is rejected by `serde_json` and mapped to an `Error` response;
+  the connection closes and the server continues.
+- A 2-second read timeout per message; the connection is closed when exceeded.
+- At most 32 requests per connection, then the server disconnects. A single
+  client therefore cannot park the service indefinitely.
+- The first pipe instance uses `FILE_FLAG_FIRST_PIPE_INSTANCE`, so a second
+  helper cannot bind the same name.
 
-**Skenario:** nama proses berisi `\n` dan teks palsu, atau command line memuat
-password, lalu masuk log dan terkirim ke bug report.
+### T6 — Log injection / data leakage through logs
 
-**Mitigasi:**
+**Scenario:** a process name contains `\n` and forged text, or a command line
+carries a password, and both end up in a log attached to a bug report.
 
-- Semua nilai dari OS di-escape (`{:?}` untuk string, bukan `{}`) saat log.
-- Command line **tidak** pernah ditulis ke log; hanya panjangnya.
-- Log default `info`, tanpa path lengkap pengguna kecuali level `debug`.
-- `core-pulse-cli doctor` mengumpulkan info sistem tanpa nama pengguna dan tanpa
-  daftar proses.
+**Mitigations:**
 
-### T7 — Bridge pihak ketiga (LHM/HWiNFO)
+- Every value from the OS is escaped (`{:?}` for strings, not `{}`) when logged.
+- Command lines are **never** written to the log; only their length.
+- Default log level is `info`, with no full user paths except at `debug`.
+- `core-pulse-cli doctor` collects system information without the user name and
+  without the process list.
 
-**Skenario:** sesuatu di `localhost:8085` menjawab dengan JSON besar atau berisi
-HTML/redirect ke host lain.
+### T7 — Third-party bridge (LHM/HWiNFO)
 
-**Mitigasi:**
+**Scenario:** something on `localhost:8085` answers with huge JSON, or serves
+HTML/a redirect to another host.
 
-- Alamat di-hardcode `127.0.0.1`, port tetap, tanpa mengikuti redirect.
-- Respons dibatasi 2 MB dan harus `Content-Type: application/json`.
-- Hanya membaca field yang dikenal; nilai di luar rentang fisik (mis. suhu
-  -273 °C atau 5000 °C) dibuang.
-- Nonaktif default; pengguna menyalakan dengan peringatan eksplisit.
-- Data ditandai `confidence: ThirdParty` dan tidak pernah dipakai untuk alert
-  `Critical` tanpa konfirmasi pengguna.
+**Mitigations:**
+
+- The address is hard-coded to `127.0.0.1`, the port is fixed, redirects are not
+  followed.
+- Responses are capped at 2 MB and must be `Content-Type: application/json`.
+- Only known fields are read; values outside physical ranges (e.g. -273 °C or
+  5000 °C) are discarded.
+- Off by default; the user enables it with an explicit warning.
+- Data is tagged `confidence: ThirdParty` and never drives a `Critical` alert
+  without user confirmation.
 
 ### T8 — Supply chain
 
-**Mitigasi:**
+**Mitigations:**
 
-- `cargo deny check` untuk advisory (RUSTSEC), lisensi, dan duplikat versi.
-- `Cargo.lock` di-commit (ini binary, bukan library).
-- Dependensi minimal: `windows`, `sysinfo`, `serde`, `parking_lot`, `tracing`,
-  `eframe`, `egui_extras`, `egui_plot`, `arc-swap`, `rusqlite`, `tray-icon`,
-  `muda`, `libloading`, `nvml-wrapper` (opsional). Tidak ada dependensi yang
-  menarik puluhan crate transitif tanpa alasan.
-- `cargo audit` dijalankan mingguan di CI, bukan hanya saat rilis.
+- `cargo deny check` for advisories (RUSTSEC), licences and duplicate versions.
+- `Cargo.lock` is committed (this is a binary, not a library).
+- Minimal dependencies: `windows`, `serde`, `parking_lot`, `tracing`, `eframe`,
+  `egui_extras`, `egui_plot`, `arc-swap`. No dependency pulls in dozens of
+  transitive crates without a reason.
+- `cargo audit` runs weekly in CI, not only at release.
 
 ### T9 — DLL hijacking
 
-**Skenario:** `igcl.dll` atau `nvml.dll` diambil dari direktori kerja atau
-`PATH` yang bisa ditulis pengguna.
+**Scenario:** `igcl.dll` or `nvml.dll` is loaded from the working directory or a
+user-writable `PATH` entry.
 
-**Mitigasi:**
+**Mitigations:**
 
-- `libloading` selalu memakai path absolut dari `System32` atau direktori driver
-  yang diketahui, dan `LoadLibraryExW` dengan `LOAD_LIBRARY_SEARCH_SYSTEM32`.
-- Tidak ada `LoadLibrary("nama.dll")` dengan nama saja.
-- Verifikasi tanda tangan DLL vendor sebelum dipakai (best effort; kalau gagal,
-  backend dilaporkan `NotAvailable`).
+- `libloading` always uses an absolute path under `System32` or a known driver
+  directory, and `LoadLibraryExW` with `LOAD_LIBRARY_SEARCH_SYSTEM32`.
+- There is no `LoadLibrary("name.dll")` with a bare name.
+- Vendor DLL signatures are checked before use (best effort; on failure the
+  backend reports `NotAvailable`).
 
-### T10 — Update channel (kalau ada)
+### T10 — Update channel (if one is added)
 
-Kalau auto-update ditambahkan nanti: manifest ditandatangani, HTTPS wajib,
-signature diperiksa **sebelum** eksekusi, dan update helper butuh elevasi
-terpisah dengan konfirmasi. Untuk v1, tidak ada auto-update.
+If auto-update is added later: signed manifest, HTTPS mandatory, signature
+verified **before** execution, and a helper update requires separate elevation
+with confirmation. For v1 there is no auto-update.
 
-## 4. Yang sengaja tidak dilakukan (dan kenapa)
+## 4. Deliberately not done (and why)
 
-| Tidak dilakukan | Alasan |
+| Not done | Reason |
 |---|---|
-| Menjalankan perintah arbitrer dari pipe | satu-satunya alasan helper ada adalah membaca; menambah eksekusi mengubah risiko secara kualitatif |
-| Menyimpan token/kredensial | tidak ada fitur yang butuh |
-| Membaca memori proses lain | butuh `PROCESS_VM_READ`, sering diblokir, dan tidak diperlukan untuk fitur v1 |
-| Driver kernel | lihat ADR-0002 |
-| Telemetri | tidak ada data keluar; bug report bersifat manual |
-| Menjalankan sebagai SYSTEM untuk UI | UI non-elevated adalah prinsip, bukan preferensi |
+| Running arbitrary commands from the pipe | the only reason the helper exists is to read; adding execution changes the risk qualitatively |
+| Storing tokens/credentials | no feature needs them |
+| Reading other processes' memory | requires `PROCESS_VM_READ`, is often blocked, and is unnecessary for v1 |
+| A kernel driver | see ADR-0002 |
+| Telemetry | no outbound data; bug reports are manual |
+| Running the UI as SYSTEM | a non-elevated UI is a principle, not a preference |
 
-## 5. Ringkasan residual risk
+## 5. Residual risk summary
 
-| Risiko | Tingkat setelah mitigasi |
+| Risk | Level after mitigation |
 |---|---|
-| Eskalasi lewat pipe | rendah (protokol tanpa perintah, ACL ketat, verifikasi klien) |
-| Aksi salah proses (PID reuse) | sangat rendah (guard creation time + test) |
-| Crash karena payload device aneh | rendah (validasi + fuzz) |
-| Kebocoran privasi lewat log | rendah (tanpa cmdline, escaping) |
-| Data sensor palsu dari pihak ketiga | sedang (opt-in, ditandai, tidak untuk alert kritis) |
-| Driver pihak ketiga yang diblokir | nol untuk kita (tidak mengemas driver) |
+| Escalation through the pipe | low (no command verbs, strict ACL, client validation) |
+| Acting on the wrong process (PID reuse) | very low (creation-time guard + tests) |
+| Crash from a hostile device payload | low (validation + fixture replay) |
+| Privacy leakage through logs | low (no command lines, escaping) |
+| Fake sensor data from a third party | medium (opt-in, tagged, not used for critical alerts) |
+| A blocked third-party driver | none for us (we ship no driver) |

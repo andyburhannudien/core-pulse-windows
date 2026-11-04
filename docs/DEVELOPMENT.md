@@ -1,18 +1,16 @@
-# Panduan pengembangan
+# Development guide
 
-## 1. Setup sekali jalan
-
-Mesin ini **belum punya Rust**. Langkah pertama:
+## 1. One-time setup
 
 ```powershell
 winget install --id Rustlang.Rustup -e
-# tutup dan buka ulang terminal supaya PATH ter-update
+# close and reopen the terminal so PATH is refreshed
 rustup default stable-x86_64-pc-windows-msvc
 rustup component add rustfmt clippy
 rustup target add x86_64-pc-windows-msvc
 ```
 
-Verifikasi toolchain:
+Verify the toolchain:
 
 ```powershell
 rustc --version      # stable
@@ -20,17 +18,18 @@ cargo --version
 cargo clippy --version
 ```
 
-Yang **tidak** perlu dipasang: Visual Studio penuh, .NET, Node, WebView2, CMake.
-MSVC Build Tools dan Windows SDK 10.0.26100 sudah ada di mesin ini.
+What you do **not** need: full Visual Studio, .NET, Node, WebView2, CMake.
+MSVC Build Tools and Windows SDK 10.0.26100 are already on the development
+machine.
 
-Alat pendukung (opsional tapi disarankan):
+Optional but recommended tooling:
 
 ```powershell
 cargo install cargo-nextest cargo-deny cargo-llvm-cov
-cargo install cargo-fuzz --version latest   # butuh nightly untuk fuzz saja
+cargo install cargo-fuzz --version latest   # nightly is only needed for fuzz
 ```
 
-## 2. Struktur workspace
+## 2. Workspace layout
 
 ```
 core-pulse/
@@ -45,82 +44,95 @@ core-pulse/
 │  ├─ ui/       core-pulse-ui      (bin: core-pulse.exe)
 │  ├─ helper/   core-pulse-helper  (bin: core-pulse-helper.exe)
 │  └─ cli/      core-pulse-cli     (bin: core-pulse-cli.exe)
+├─ scripts/     screenshot.ps1, capture-docs.ps1
 ├─ tests/fixtures/
 ├─ docs/
 └─ .github/workflows/ci.yml
 ```
 
-## 3. Perintah sehari-hari
+## 3. Everyday commands
 
 ```powershell
 cargo build                      # debug
 cargo build --release            # release, LTO
-cargo run -p core-pulse-ui       # jalankan UI
+cargo run -p core-pulse-ui       # run the UI (maximised)
+cargo run -p core-pulse-ui -- sensors      # open a specific tab
+cargo run -p core-pulse-ui -- --windowed   # keep the default window size
 cargo run -p core-pulse-cli -- top --watch 1s
 cargo run -p core-pulse-cli -- doctor
 
 cargo fmt --all
 cargo clippy --workspace --all-targets -- -D warnings
-cargo nextest run --workspace    # atau: cargo test --workspace
+cargo nextest run --workspace    # or: cargo test --workspace
 cargo deny check
 
-cargo run -p core-pulse-cli -- bench --seconds 60   # budget performa
+cargo run -p core-pulse-cli -- bench --seconds 60   # performance budget
 cargo run -p core-pulse-cli -- record --out tests/fixtures/snapshot/x.json
 ```
 
-Test live (menyentuh mesin sungguhan) hanya jalan kalau diminta:
+Live checks (they touch the real machine) are CLI subcommands, not ignored
+tests, because they print evidence:
 
 ```powershell
-$env:CORE_PULSE_LIVE = "1"
-cargo nextest run --workspace --run-ignored all
+cargo run -p core-pulse-cli -- action-selftest   # PID-reuse guard
+cargo run -p core-pulse-cli -- helper-selftest   # Gate G4 IPC checks
+cargo run -p core-pulse-cli -- sensors --helper  # sensor reality check
 ```
 
-## 4. Konvensi kode
+Screenshots for the docs are captured from a running UI, one tab at a time:
 
-| Aturan | Detail |
+```powershell
+cargo build -p core-pulse-ui
+powershell -ExecutionPolicy Bypass -File scripts\capture-docs.ps1
+```
+
+## 4. Code conventions
+
+| Rule | Detail |
 |---|---|
-| Format | `rustfmt` default, tanpa `rustfmt.toml` kustom di awal |
-| Lint | `clippy -D warnings`, `unsafe_op_in_unsafe_fn` deny |
-| Nama | tipe & fungsi English; komentar boleh Indonesia untuk alasan desain |
-| Error | `thiserror` di library, `anyhow` di binary |
-| Panic | dilarang di library pada input dari OS; `expect()` hanya untuk invariant yang terbukti |
-| Log | `tracing`, dengan field terstruktur (`pid`, `provider`), bukan format string |
-| Unit | satuan di nama field: `_bytes`, `_ms`, `_percent`, `_c` |
-| Optional | `Option` = tidak diketahui; jangan pakai `0` sebagai sentinel |
+| Format | default `rustfmt`, no custom `rustfmt.toml` initially |
+| Lint | `clippy -D warnings`, `unsafe_op_in_unsafe_fn` denied |
+| Language | identifiers, comments and user-facing strings in **English** |
+| Errors | `thiserror` in libraries, `anyhow` in binaries |
+| Panic | forbidden in libraries on OS-provided input; `expect()` only for proven invariants |
+| Logging | `tracing` with structured fields (`pid`, `provider`), not format strings |
+| Units | put the unit in the field name: `_bytes`, `_ms`, `_percent`, `_c` |
+| Optional | `Option` means unknown; never use `0` as a sentinel |
 
-Commit message: `feat:`, `fix:`, `docs:`, `perf:`, `refactor:`, `test:`, `chore:`.
-Satu commit = satu perubahan yang bisa dijelaskan dalam satu kalimat.
+Commit message: `feat:`, `fix:`, `docs:`, `perf:`, `refactor:`, `test:`,
+`chore:`. One commit is one change explainable in one sentence.
 
 ## 5. Debugging
 
-| Masalah | Alat |
+| Problem | Tool |
 |---|---|
-| Angka aneh | `core-pulse-cli top --json` lalu bandingkan dengan Task Manager |
-| Sensor tidak muncul | `core-pulse-cli doctor` (menampilkan status tiap provider) |
-| UI lambat | `--bench`, lalu WPR/WPA untuk sampel CPU |
-| Kebocoran memori | `dhat` feature di debug build |
-| Helper tidak terhubung | log helper di `%LOCALAPPDATA%\core-pulse\logs\helper.log` |
-| Panic | log + dialog; kalau tidak ada, jalankan dari terminal untuk melihat stderr |
+| Suspicious numbers | `core-pulse-cli top --json`, compare with Task Manager |
+| Sensor missing | `core-pulse-cli doctor` (shows each provider's state) |
+| UI slow | `--bench`, then WPR/WPA for a CPU sample |
+| Memory leak | `dhat` feature in a debug build |
+| Helper not connecting | `core-pulse-cli helper`; helper log at `%LOCALAPPDATA%\core-pulse\logs\helper.log` |
+| Panic | log + dialog; if neither, run from a terminal to see stderr |
+| Renderer issues | run with `--windowed`; `glow` is the supported renderer |
 
-Level log diatur lewat `CORE_PULSE_LOG=debug` (default `info`).
+Log level is set with `CORE_PULSE_LOG=debug` (default `info`).
 
-## 6. Troubleshooting setup
+## 6. Setup troubleshooting
 
-| Gejala | Penyebab | Solusi |
+| Symptom | Cause | Fix |
 |---|---|---|
-| `error: linker 'link.exe' not found` | MSVC env tidak terdeteksi | jalankan dari *x64 Native Tools Command Prompt*, atau `cmd /c "vcvars64.bat && cargo build"` |
-| `rustc` tidak dikenali setelah install | PATH belum refresh | buka terminal baru |
-| `error: could not compile windows-sys` | target salah | `rustup target add x86_64-pc-windows-msvc` |
-| Build sangat lambat pertama kali | `windows` crate besar + LTO | normal; incremental build berikutnya cepat |
-| `cargo deny` gagal karena lisensi | dependensi baru | tambahkan ke `deny.toml` hanya setelah lisensi diperiksa |
-| UI muncul kosong | gagal load font/snapshot pertama | cek log; UI harus menampilkan placeholder, bukan kosong — kalau kosong, itu bug |
+| `error: linker 'link.exe' not found` | MSVC environment not detected | run from *x64 Native Tools Command Prompt*, or `cmd /c "vcvars64.bat && cargo build"` |
+| `rustc` not recognised after install | PATH not refreshed | open a new terminal |
+| `error: could not compile windows-sys` | wrong target | `rustup target add x86_64-pc-windows-msvc` |
+| First build very slow | large `windows` crate + LTO | normal; subsequent incremental builds are fast |
+| `cargo deny` fails on a licence | new dependency | add it to `deny.toml` only after checking the licence |
+| UI appears empty | font or first-snapshot failure | check the log; the UI must show a placeholder, not a blank window — a blank window is a bug |
 
-## 7. Definisi "selesai" untuk sebuah PR
+## 7. Definition of done for a PR
 
-1. `cargo fmt --check` bersih.
-2. `cargo clippy -- -D warnings` bersih.
-3. Test baru untuk logika baru; test regresi untuk bug yang diperbaiki.
-4. Tidak ada penurunan benchmark > 20%.
-5. Dokumentasi diperbarui kalau perilaku yang terlihat pengguna berubah
-   (`docs/`, dan `DATA-MODEL.md` kalau skema berubah).
-6. Tidak ada `TODO` tanpa issue atau tanpa nama fase di komentar.
+1. `cargo fmt --check` clean.
+2. `cargo clippy -- -D warnings` clean.
+3. New tests for new logic; regression tests for fixed bugs.
+4. No benchmark regression > 20%.
+5. Documentation updated when user-visible behaviour changes (`docs/`, and
+   `DATA-MODEL.md` when the schema changes).
+6. No `TODO` without an issue or a phase name in the comment.

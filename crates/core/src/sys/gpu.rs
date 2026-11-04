@@ -62,7 +62,7 @@ impl GpuCollector {
             degraded.push(Degradation {
                 area: crate::model::Area::Gpu,
                 reason: DegradeReason::ApiFailed,
-                detail: "PDH tidak tersedia; utilisasi GPU tidak diukur".into(),
+                detail: "PDH unavailable; GPU utilization is not measured".into(),
             });
             return (Vec::new(), HashMap::new(), degraded);
         }
@@ -79,7 +79,7 @@ impl GpuCollector {
                 } else {
                     DegradeReason::ApiFailed
                 },
-                detail: "counter GPU Engine tidak mengembalikan instance".into(),
+                detail: "the GPU Engine counter returned no instance".into(),
             });
         }
 

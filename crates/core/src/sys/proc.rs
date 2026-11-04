@@ -102,7 +102,7 @@ impl ProcCollector {
                 degraded.push(Degradation {
                     area: crate::model::Area::Processes,
                     reason: crate::model::DegradeReason::ApiFailed,
-                    detail: format!("enumerasi proses gagal: {e}"),
+                    detail: format!("process enumeration failed: {e}"),
                 });
                 return (Vec::new(), degraded);
             }
