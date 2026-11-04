@@ -193,7 +193,11 @@ impl eframe::App for App {
 
         egui::CentralPanel::default().show(ui, |ui| match self.state.tab {
             Tab::Processes => self.processes(ui),
-            Tab::Performance => self.performance(ui),
+            Tab::Performance => {
+                // Konten Kinerja lebih tinggi dari window minimum; biarkan
+                // scroll supaya tidak ada kartu yang terpotong di 560 px.
+                egui::ScrollArea::vertical().show(ui, |ui| self.performance(ui));
+            }
         });
     }
 }
@@ -224,6 +228,7 @@ impl App {
             .column(Column::exact(70.0))
             .column(Column::exact(80.0))
             .column(Column::exact(100.0))
+            .column(Column::exact(70.0))
             .column(Column::exact(70.0))
             .column(Column::exact(80.0))
             .min_scrolled_height(0.0)
@@ -284,6 +289,9 @@ impl App {
                     }
                 });
                 header.col(|ui| {
+                    ui.strong("GPU");
+                });
+                header.col(|ui| {
                     ui.strong("Thread");
                 });
                 header.col(|ui| {
@@ -312,6 +320,14 @@ impl App {
                     });
                     row.col(|ui| {
                         ui.monospace(format::bytes(p.mem_private_bytes));
+                    });
+                    row.col(|ui| {
+                        // `None` = tidak terukur (kolom GPU mati), bukan 0%.
+                        ui.monospace(
+                            p.gpu_percent
+                                .map(|g| format!("{g:.1}%"))
+                                .unwrap_or_else(|| "—".into()),
+                        );
                     });
                     row.col(|ui| {
                         ui.monospace(p.threads.to_string());
@@ -416,28 +432,139 @@ impl App {
         });
 
         ui.add_space(8.0);
+        ui.columns(2, |cols| {
+            // Kartu Disk
+            egui::Frame::group(cols[0].style()).show(&mut cols[0], |ui| {
+                ui.vertical(|ui| {
+                    ui.label(egui::RichText::new("Disk").strong());
+                    if s.disks.is_empty() {
+                        unavailable_note(ui, "counter PhysicalDisk tidak tersedia");
+                        return;
+                    }
+                    for d in &s.disks {
+                        ui.add_space(2.0);
+                        ui.horizontal(|ui| {
+                            ui.label(egui::RichText::new(format::truncate(&d.model, 26)).strong());
+                            ui.label(
+                                egui::RichText::new(format!("{:?}", d.media))
+                                    .weak()
+                                    .size(10.0),
+                            );
+                        });
+                        let bar_w = (ui.available_width() - 8.0).max(80.0);
+                        ui.add(
+                            egui::ProgressBar::new(d.busy_percent / 100.0)
+                                .desired_width(bar_w)
+                                .text(format!("{:.0}% aktif", d.busy_percent)),
+                        );
+                        ui.label(
+                            egui::RichText::new(format!(
+                                "R {}  W {}  antrean {:.2}  {:.1} ms",
+                                format::bytes(d.read_bps),
+                                format::bytes(d.write_bps),
+                                d.queue_depth,
+                                d.avg_response_ms
+                            ))
+                            .weak()
+                            .size(11.0),
+                        );
+                    }
+                });
+            });
+
+            // Kartu GPU
+            egui::Frame::group(cols[1].style()).show(&mut cols[1], |ui| {
+                ui.vertical(|ui| {
+                    ui.label(egui::RichText::new("GPU").strong());
+                    if s.gpus.is_empty() {
+                        unavailable_note(ui, "counter GPU Engine tidak tersedia");
+                        return;
+                    }
+                    for g in &s.gpus {
+                        ui.add_space(2.0);
+                        ui.label(egui::RichText::new(format::truncate(&g.name, 34)).strong());
+                        let bar_w = (ui.available_width() - 8.0).max(80.0);
+                        ui.add(
+                            egui::ProgressBar::new(g.utilization_percent.unwrap_or(0.0) / 100.0)
+                                .desired_width(bar_w)
+                                .text(format!("{:.0}%", g.utilization_percent.unwrap_or(0.0))),
+                        );
+                        let mem = match (g.dedicated_used_bytes, g.shared_used_bytes) {
+                            (Some(d), Some(sh)) if d > 0 => format!(
+                                "khusus {}  bersama {}",
+                                format::bytes(d),
+                                format::bytes(sh)
+                            ),
+                            (_, Some(sh)) => format!("bersama {}", format::bytes(sh)),
+                            (Some(d), None) => format!("khusus {}", format::bytes(d)),
+                            _ => "memori tidak terukur".to_string(),
+                        };
+                        ui.label(egui::RichText::new(mem).weak().size(11.0));
+                        ui.label(
+                            egui::RichText::new(format!(
+                                "suhu {}",
+                                format::temp_c(g.temperature_c)
+                            ))
+                            .weak()
+                            .size(11.0),
+                        );
+                    }
+                });
+            });
+        });
+
+        ui.add_space(8.0);
+        egui::Frame::group(ui.style()).show(ui, |ui| {
+            ui.vertical(|ui| {
+                ui.label(egui::RichText::new("Jaringan").strong());
+                if s.net.is_empty() {
+                    unavailable_note(ui, "tidak ada adapter non-loopback");
+                    return;
+                }
+                for n in &s.net {
+                    ui.horizontal(|ui| {
+                        let dot = if n.is_up { "●" } else { "○" };
+                        let color = if n.is_up {
+                            egui::Color32::from_rgb(0x4A, 0xC0, 0x7A)
+                        } else {
+                            ui.visuals().weak_text_color()
+                        };
+                        ui.label(egui::RichText::new(dot).color(color));
+                        ui.label(format::truncate(&n.name, 22));
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            ui.monospace(format!(
+                                "↓ {}  ↑ {}",
+                                format::bytes(n.rx_bps),
+                                format::bytes(n.tx_bps)
+                            ));
+                        });
+                    });
+                }
+            });
+        });
+
+        ui.add_space(8.0);
         egui::Frame::group(ui.style()).show(ui, |ui| {
             ui.vertical(|ui| {
                 ui.label(egui::RichText::new("Riwayat 60 detik").strong());
                 let hist = &self.state.history;
                 let w = ui.available_width();
-                draw_sparkline(
-                    ui,
-                    &hist.cpu,
-                    w,
-                    0.0..=100.0,
-                    egui::Color32::from_rgb(0x4A, 0x9E, 0xFF),
-                    "CPU",
-                );
-                ui.add_space(4.0);
-                draw_sparkline(
-                    ui,
-                    &hist.mem,
-                    w,
-                    0.0..=100.0,
-                    egui::Color32::from_rgb(0x4A, 0xC0, 0x7A),
-                    "RAM",
-                );
+                let rows: [(&[f32], egui::Color32, &str); 4] = [
+                    (&hist.cpu, egui::Color32::from_rgb(0x4A, 0x9E, 0xFF), "CPU"),
+                    (&hist.mem, egui::Color32::from_rgb(0x4A, 0xC0, 0x7A), "RAM"),
+                    (&hist.gpu, egui::Color32::from_rgb(0xB0, 0x7A, 0xE0), "GPU"),
+                    (
+                        &hist.disk,
+                        egui::Color32::from_rgb(0xE0, 0xA0, 0x30),
+                        "Disk",
+                    ),
+                ];
+                for (i, (values, color, label)) in rows.into_iter().enumerate() {
+                    if i > 0 {
+                        ui.add_space(4.0);
+                    }
+                    draw_sparkline(ui, values, w, 0.0..=100.0, color, label);
+                }
             });
         });
 
@@ -453,6 +580,11 @@ impl App {
             });
         }
     }
+}
+
+/// Catatan kecil untuk bagian yang tidak punya sumber data.
+fn unavailable_note(ui: &mut egui::Ui, reason: &str) {
+    ui.label(egui::RichText::new(format!("— {reason}")).weak().size(11.0));
 }
 
 /// Hitung titik polyline untuk sparkline. Nilai lebih besar = y lebih kecil
@@ -482,7 +614,7 @@ fn draw_sparkline(
     label: &str,
 ) {
     let (rect, _) =
-        ui.allocate_exact_size(egui::vec2(width.max(120.0), 56.0), egui::Sense::hover());
+        ui.allocate_exact_size(egui::vec2(width.max(120.0), 44.0), egui::Sense::hover());
     let painter = ui.painter_at(rect);
     painter.rect_filled(rect, 2.0, ui.visuals().extreme_bg_color);
 

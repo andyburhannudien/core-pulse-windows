@@ -1,8 +1,12 @@
 //! Akses langsung ke API Windows. Satu-satunya tempat `unsafe` di crate ini.
 
 pub mod cpu;
+pub mod disk;
+pub mod gpu;
 pub mod host;
 pub mod mem;
+pub mod net;
+pub mod pdh;
 pub mod proc;
 
 /// Query `NtQuerySystemInformation` untuk kelas informasi yang mengembalikan

@@ -118,12 +118,15 @@ klaim "RAM Anda kritis" tanpa menyebut bahwa itu estimasi.
 pub struct DiskData {
     pub index: u32,               // \\.\PhysicalDriveN
     pub model: String,
-    pub bus: BusType,             // Nvme, Sata, Usb, Unknown
+    pub bus: BusType,             // Nvme, Sata, Usb, Other, Unknown
     pub size_bytes: u64,
     pub media: MediaType,         // Ssd, Hdd, Unknown
+    /// `true` = size_bytes dihitung dari volume ter-mount, bukan kapasitas fisik.
+    /// Terjadi saat aplikasi tidak elevated (lihat P1-RESULTS §3.1).
+    pub size_is_estimate: bool,
     pub read_bps: u64,
     pub write_bps: u64,
-    pub busy_percent: f32,
+    pub busy_percent: f32,        // 100 - % Idle Time, bukan % Disk Time
     pub avg_response_ms: f32,
     pub queue_depth: f32,
 }
@@ -160,13 +163,26 @@ pub struct GpuData {
     pub name: String,             // "Intel(R) UHD Graphics 630"
     pub vendor: GpuVendor,        // Intel, Nvidia, Amd, Microsoft, Other
     pub driver_version: String,
+    /// Kapasitas memori khusus. `None` sampai DXGI dipakai (P3); PDH hanya
+    /// melaporkan pemakaian, bukan kapasitas.
     pub dedicated_mem_bytes: Option<u64>,
     pub shared_mem_bytes: Option<u64>,
     pub utilization_percent: Option<f32>,
+    /// Pemakaian memori khusus saat ini (PDH `GPU Adapter Memory`).
     pub dedicated_used_bytes: Option<u64>,
+    /// Pemakaian memori bersama saat ini. Ini yang terisi pada iGPU.
+    pub shared_used_bytes: Option<u64>,
     pub temperature_c: Option<f32>,   // None kalau tidak ada NVML/IGCL/ADLX
 }
 ```
+
+**Agregasi GPU** (meniru Task Manager, lihat [P1-RESULTS §3.3](P1-RESULTS.md#33-gpu-maksimum-per-adapter-jumlah-per-proses)):
+
+- `utilization_percent` per adapter = **maksimum** di antara engine (3D, Copy,
+  VideoDecode, ...), bukan jumlah.
+- `gpu_percent` per proses = **jumlah** engine untuk PID tersebut, dibatasi 100.
+- `None` hanya berarti "tidak terukur". Kalau pengukuran GPU aktif dan sebuah
+  proses tidak punya instance engine, nilainya `Some(0.0)`.
 
 ### `ProcessRow`
 
@@ -244,8 +260,7 @@ tindakan pengguna berbeda.
 ## 3. Sensor
 
 ```rust
-pub struct SensorReading {
-    pub id: String,               // stabil: "cpu.package", "disk.0.temp"
+pub struct SensorReading {    pub id: String,               // stabil: "cpu.package", "disk.0.temp"
     pub kind: SensorKind,         // Temperature, Fan, Voltage, Power, Clock, Load
     pub label: String,            // "CPU Package", "ST1000LM049 Temperature"
     pub value: f32,

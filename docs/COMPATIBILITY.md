@@ -36,6 +36,9 @@ Kolom "mesin ini" merujuk pada mesin pengembangan yang diaudit di
 | Signature & publisher | ya | **ya** | `WinVerifyTrust` |
 | Suhu disk SATA | ya, butuh admin | **ya, butuh helper** | `SMART_RCV_DRIVE_DATA` |
 | Suhu disk NVMe | ya, butuh admin | **tidak berlaku** | NVMe health log |
+| Ukuran disk fisik | ya | **estimasi** (butuh admin untuk angka persis) | `IOCTL_DISK_GET_LENGTH_INFO` |
+| Kapasitas memori GPU | ya | **belum** (DXGI, P3) | `IDXGIAdapter3::QueryVideoMemoryInfo` |
+| Nama adapter GPU | ya | **ya, best effort** | registry kelas display |
 | Suhu CPU via ACPI | tergantung firmware | **tidak** (0 thermal zone) | firmware mengekspos TZ |
 | Suhu CPU via MSR | butuh driver | **tidak** | driver ring0 (ditolak v1) |
 | Suhu GPU NVIDIA | ya | tidak berlaku | `nvml.dll` |

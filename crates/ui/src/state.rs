@@ -27,6 +27,8 @@ impl SortKey {
 pub struct History {
     pub cpu: Vec<f32>,
     pub mem: Vec<f32>,
+    pub gpu: Vec<f32>,
+    pub disk: Vec<f32>,
 }
 
 impl Default for History {
@@ -34,18 +36,24 @@ impl Default for History {
         Self {
             cpu: Vec::with_capacity(60),
             mem: Vec::with_capacity(60),
+            gpu: Vec::with_capacity(60),
+            disk: Vec::with_capacity(60),
         }
     }
 }
 
 impl History {
-    pub fn push(&mut self, cpu: f32, mem_percent: f32) {
+    pub fn push(&mut self, cpu: f32, mem_percent: f32, gpu: f32, disk: f32) {
         if self.cpu.len() >= 60 {
             self.cpu.remove(0);
             self.mem.remove(0);
+            self.gpu.remove(0);
+            self.disk.remove(0);
         }
         self.cpu.push(cpu);
         self.mem.push(mem_percent);
+        self.gpu.push(gpu);
+        self.disk.push(disk);
     }
 }
 
@@ -87,7 +95,17 @@ impl AppState {
         self.last_seq = snap.seq;
         let total = snap.memory.total_bytes.max(1) as f32;
         let used = snap.memory.in_use_bytes as f32 / total * 100.0;
-        self.history.push(snap.cpu.total_percent, used);
+        let gpu = snap
+            .gpus
+            .iter()
+            .filter_map(|g| g.utilization_percent)
+            .fold(0.0f32, f32::max);
+        let disk = snap
+            .disks
+            .iter()
+            .map(|d| d.busy_percent)
+            .fold(0.0f32, f32::max);
+        self.history.push(snap.cpu.total_percent, used, gpu, disk);
         self.snapshot = Arc::clone(snap);
     }
 
@@ -237,10 +255,11 @@ mod tests {
     fn history_is_capped() {
         let mut h = History::default();
         for i in 0..100 {
-            h.push(i as f32, 0.0);
+            h.push(i as f32, 0.0, 0.0, 0.0);
         }
         assert_eq!(h.cpu.len(), 60);
         assert_eq!(h.cpu[59], 99.0);
+        assert_eq!(h.disk.len(), 60);
     }
 
     #[test]

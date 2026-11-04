@@ -217,8 +217,8 @@ Status implementasi per bagian spesifikasi ini:
 | Bagian | Status |
 |---|---|
 | §2 kerangka window (nav, toolbar, status bar) | **Selesai** |
-| §3 tab Proses (kolom, sort, search, virtualized) | **Selesai** (kolom Jaringan/GPU/Disk menyusul di P1) |
-| §4 tab Kinerja (CPU, memori, grafik) | **Sebagian** — disk/net/GPU menyusul di P1 |
+| §3 tab Proses (kolom, sort, search, virtualized) | **Selesai** untuk Nama/PID/CPU/Memori/GPU/Thread/Handle |
+| §4 tab Kinerja (CPU, memori, disk, GPU, jaringan, grafik) | **Selesai** |
 | §5 tab Sensor | Belum (P3) |
 | §6 tab lain | Belum (P2) |
 | §7 menu kontekstual | Belum (P2) |

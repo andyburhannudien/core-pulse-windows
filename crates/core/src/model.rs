@@ -123,6 +123,10 @@ pub struct DiskData {
     pub bus: BusType,
     pub media: MediaType,
     pub size_bytes: u64,
+    /// `true` kalau `size_bytes` dihitung dari jumlah volume ter-mount, bukan
+    /// dari kapasitas fisik (terjadi saat aplikasi tidak elevated).
+    #[serde(default)]
+    pub size_is_estimate: bool,
     pub read_bps: u64,
     pub write_bps: u64,
     pub busy_percent: f32,
@@ -168,10 +172,17 @@ pub struct GpuData {
     pub name: String,
     pub vendor: GpuVendor,
     pub driver_version: String,
+    /// Kapasitas memori khusus. `None` sampai DXGI dipakai (P3); PDH hanya
+    /// melaporkan pemakaian, bukan kapasitas.
     pub dedicated_mem_bytes: Option<u64>,
+    /// Kapasitas memori bersama. `None` dengan alasan yang sama.
     pub shared_mem_bytes: Option<u64>,
     pub utilization_percent: Option<f32>,
+    /// Pemakaian memori khusus saat ini (PDH `GPU Adapter Memory`).
     pub dedicated_used_bytes: Option<u64>,
+    /// Pemakaian memori bersama saat ini. Ini yang terisi pada iGPU.
+    #[serde(default)]
+    pub shared_used_bytes: Option<u64>,
     pub temperature_c: Option<f32>,
 }
 
