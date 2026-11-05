@@ -36,6 +36,26 @@ pub mod palette {
     pub const CYAN: Color32 = Color32::from_rgb(0x4F, 0xC5, 0xD8);
 }
 
+/// Type scale. Five steps, no more.
+///
+/// Earlier revisions used `.size(9.0)`, `9.5`, `10.0`, `10.5` and `11.0`
+/// interchangeably, which is visually indistinguishable but makes the layout
+/// feel unsettled. Every explicit size in the UI must come from this scale.
+pub mod size {
+    /// Table headers, footnotes, unit suffixes.
+    pub const MICRO: f32 = 9.5;
+    /// Secondary labels and metadata.
+    pub const SMALL: f32 = 10.5;
+    /// Default table cell text.
+    pub const BODY: f32 = 12.0;
+    /// Emphasised body text (section titles, process names in dialogs).
+    pub const STRONG: f32 = 12.5;
+    /// Page title in the command bar.
+    pub const TITLE: f32 = 16.0;
+    /// KPI tile numerals.
+    pub const METRIC: f32 = 22.0;
+}
+
 /// Install fonts and global style. Called once from `App::new`.
 pub fn install(ctx: &egui::Context) {
     ctx.set_fonts(fonts());
@@ -64,6 +84,11 @@ fn fonts() -> FontDefinitions {
 
     // The Windows UI faces are used when present; the bundled Ubuntu/Hack
     // fonts remain as fallbacks so the app still renders on other machines.
+    //
+    // IMPORTANT: the bold face must not be inserted at index 0 of the
+    // `Proportional` family. Doing that makes *every* label bold, because the
+    // family list is a glyph source order, not a weight selector. Bold lives in
+    // its own named family instead and is opted into via `bold()` below.
     if let Ok(bytes) = std::fs::read(r"C:\Windows\Fonts\segoeui.ttf") {
         defs.font_data.insert(
             "segoe".into(),
@@ -79,10 +104,12 @@ fn fonts() -> FontDefinitions {
             "segoe-bold".into(),
             std::sync::Arc::new(FontData::from_owned(bytes)),
         );
-        defs.families
-            .entry(FontFamily::Proportional)
-            .or_default()
-            .insert(0, "segoe-bold".into());
+        // A dedicated family, so only text that asks for it is bold.
+        defs.families.insert(
+            FontFamily::Name(BOLD_FAMILY.into()),
+            vec!["segoe-bold".into(), "segoe".into()],
+        );
+        BOLD_LOADED.store(true, std::sync::atomic::Ordering::Relaxed);
     }
     if let Ok(bytes) = std::fs::read(r"C:\Windows\Fonts\consola.ttf") {
         defs.font_data.insert(
@@ -94,27 +121,79 @@ fn fonts() -> FontDefinitions {
             .or_default()
             .insert(0, "consolas".into());
     }
+    if let Ok(bytes) = std::fs::read(r"C:\Windows\Fonts\consolab.ttf") {
+        defs.font_data.insert(
+            "consolas-bold".into(),
+            std::sync::Arc::new(FontData::from_owned(bytes)),
+        );
+        defs.families.insert(
+            FontFamily::Name(BOLD_MONO_FAMILY.into()),
+            vec!["consolas-bold".into(), "consolas".into()],
+        );
+        BOLD_MONO_LOADED.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
     defs
 }
 
+/// Name of the optional bold proportional family.
+const BOLD_FAMILY: &str = "core-pulse-bold";
+/// Name of the optional bold monospace family.
+const BOLD_MONO_FAMILY: &str = "core-pulse-bold-mono";
+
+/// Set once by `fonts()`: whether a real bold proportional face was installed.
+static BOLD_LOADED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// Set once by `fonts()`: whether a real bold monospace face was installed.
+static BOLD_MONO_LOADED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Font id for emphasised text (headings, section titles, dialog titles).
+///
+/// egui's `RichText::strong()` only brightens the colour; it does not select a
+/// bolder face. To get an actual bold weight the text has to ask for this
+/// family explicitly.
+pub fn bold(size: f32) -> FontId {
+    if BOLD_LOADED.load(std::sync::atomic::Ordering::Relaxed) {
+        FontId::new(size, FontFamily::Name(BOLD_FAMILY.into()))
+    } else {
+        FontId::new(size, FontFamily::Proportional)
+    }
+}
+
+/// Bold monospace, for emphasised numerals (temperature readouts, values).
+///
+/// Falls back to the regular monospace family when no bold face is installed;
+/// the colour and size still carry the emphasis.
+pub fn bold_mono(size: f32) -> FontId {
+    if BOLD_MONO_LOADED.load(std::sync::atomic::Ordering::Relaxed) {
+        FontId::new(size, FontFamily::Name(BOLD_MONO_FAMILY.into()))
+    } else {
+        FontId::new(size, FontFamily::Monospace)
+    }
+}
+
 fn text_styles() -> BTreeMap<TextStyle, FontId> {
+    // These must match `ui::theme::size`; TextEdit, ComboBox and docs render
+    // through them, so a mismatch would show up as slightly different text
+    // next to explicitly-sized labels.
     let mut map = BTreeMap::new();
     map.insert(
         TextStyle::Heading,
-        FontId::new(17.0, FontFamily::Proportional),
+        FontId::new(size::TITLE, FontFamily::Proportional),
     );
-    map.insert(TextStyle::Body, FontId::new(13.0, FontFamily::Proportional));
+    map.insert(
+        TextStyle::Body,
+        FontId::new(size::BODY, FontFamily::Proportional),
+    );
     map.insert(
         TextStyle::Button,
-        FontId::new(12.5, FontFamily::Proportional),
+        FontId::new(size::SMALL, FontFamily::Proportional),
     );
     map.insert(
         TextStyle::Small,
-        FontId::new(11.0, FontFamily::Proportional),
+        FontId::new(size::MICRO, FontFamily::Proportional),
     );
     map.insert(
         TextStyle::Monospace,
-        FontId::new(12.0, FontFamily::Monospace),
+        FontId::new(size::BODY, FontFamily::Monospace),
     );
     map
 }

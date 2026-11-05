@@ -87,6 +87,15 @@ The helper also caps each connection at 32 requests, caps a frame at 1 MiB, and
 applies a 2-second read timeout, so a malicious client cannot hold the service
 open or exhaust memory with an oversized frame.
 
+**Residual risk (documented honestly):** `FlushFileBuffers` on the server has no
+timeout. A client that sends a valid request and then stops reading its response
+can still stall that one connection. This was found by testing (a client that
+connects and sends nothing used to block all other clients forever; the
+`PeekNamedPipe`-based read fixed that case). Closing the remaining case needs an
+explicit client ACK in protocol v2. Until then, a compromised local process can
+degrade the helper's availability — but cannot read data, issue commands, or
+elevate privileges through it.
+
 ### T3 — PID reuse (acting on the wrong process)
 
 **Scenario:** the user presses "End task" on PID 4820. Between render and action
@@ -136,11 +145,20 @@ data to exhaust the helper's memory.
   the helper keeps serving new clients afterwards.
 - Invalid JSON is rejected by `serde_json` and mapped to an `Error` response;
   the connection closes and the server continues.
-- A 2-second read timeout per message; the connection is closed when exceeded.
+- A 2-second read timeout per message, enforced with `PeekNamedPipe` polling
+  rather than a blocking `ReadFile`. Without this, a client that connected and
+  sent nothing held the only pipe instance and rejected every other client
+  indefinitely — reproduced during review, now fixed and covered by the
+  silent-client check below.
 - At most 32 requests per connection, then the server disconnects. A single
   client therefore cannot park the service indefinitely.
 - The first pipe instance uses `FILE_FLAG_FIRST_PIPE_INSTANCE`, so a second
   helper cannot bind the same name.
+
+**Verified failure mode (before the fix):** a silent client made
+`core-pulse-cli helper` fail with "helper is busy or not responding" for as long
+as the client stayed connected. After the fix the next client is served after at
+most one read timeout (~2 s).
 
 ### T6 — Log injection / data leakage through logs
 

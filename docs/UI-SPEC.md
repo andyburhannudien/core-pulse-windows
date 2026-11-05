@@ -218,9 +218,49 @@ explanatory note below when a limitation applies.
 | Success / warning / danger | `#4FC386` / `#E3A83E` / `#E5605A` |
 | Chart series | CPU blue, RAM green, disk amber, network cyan, GPU purple |
 
-Typography: Segoe UI for prose (13 px body, 17 px headings), Consolas for every
-numeral and identifier (12 px). Body text never below 10 px; table headers are
-9.5 px uppercase with 1.1 px letter spacing.
+### Type scale
+
+Exactly five steps. Every explicit size in the UI comes from `theme::size`; ad
+hoc `.size(9.0)`/`.size(10.0)` values are not allowed because five sizes inside
+a 2 px range look identical but make the layout feel unsettled.
+
+| Token | Size | Use |
+|---|---|---|
+| `MICRO` | 9.5 | table headers, footnotes, unit suffixes |
+| `SMALL` | 10.5 | secondary labels and metadata |
+| `BODY` | 12.0 | default table cell text, monospace numerals |
+| `STRONG` | 12.5 | section titles, process names |
+| `TITLE` | 16.0 | page title in the command bar |
+| `METRIC` | 22.0 | KPI tile numerals |
+
+Fonts: Segoe UI (prose), Consolas (numerals), and their bold faces. egui's
+`RichText::strong()` only brightens the colour, so emphasis uses
+`theme::bold(size)` / `theme::bold_mono(size)`, which select real bold families
+and fall back to the regular face when a bold file is absent.
+
+### Icons
+
+Navigation icons are **painted geometry**, not glyphs. Unicode picks such as `⚙`
+and `▶` are claimed by the Windows emoji font, so they rendered as full-colour
+emoji next to monochrome text glyphs — two items in the rail glowed purple and
+blue. Drawing the shapes gives every item identical weight and colour and needs
+no font.
+
+Status and value symbols elsewhere come from `ui::icons`, one character each:
+
+| Constant | Glyph | Meaning |
+|---|---|---|
+| `DOT_ON` / `DOT_OFF` | `●` / `○` | active / inactive |
+| `UP` / `DOWN` | `▲` / `▼` | raised / cleared |
+| `CHECK` / `CROSS` | `✓` / `✕` | success / failure |
+| `DASH` | `—` | unknown or unavailable |
+| `PENDING` | `…` | not read yet |
+| `APPROX` | `≈` | derived value |
+| `THIRD_PARTY` | `◇` | third-party source |
+| `BULLET` | `•` | prose list item |
+
+`DASH` and `PENDING` are deliberately different: a dash means the source
+refused or is absent, pending means nobody has looked yet.
 
 ## 13. Accessibility
 

@@ -7,7 +7,8 @@
 use crate::theme::palette as p;
 use eframe::egui;
 use egui::{
-    Align2, Color32, CornerRadius, FontId, Rect, Response, Sense, Stroke, StrokeKind, Ui, Vec2,
+    Align2, Color32, CornerRadius, FontId, Pos2, Rect, Response, Sense, Stroke, StrokeKind, Ui,
+    Vec2,
 };
 
 /// Card surface used for every grouped block.
@@ -34,10 +35,9 @@ pub fn card(ui: &mut Ui, add: impl FnOnce(&mut Ui)) -> Response {
 pub fn kicker(ui: &mut Ui, text: &str) {
     ui.label(
         egui::RichText::new(text.to_uppercase())
-            .size(9.5)
+            .font(crate::theme::bold(crate::theme::size::MICRO))
             .extra_letter_spacing(1.1)
-            .color(p::TEXT_FAINT)
-            .strong(),
+            .color(p::TEXT_FAINT),
     );
 }
 
@@ -46,8 +46,7 @@ pub fn section(ui: &mut Ui, title: &str, right: impl FnOnce(&mut Ui)) {
     ui.horizontal(|ui| {
         ui.label(
             egui::RichText::new(title)
-                .size(12.5)
-                .strong()
+                .font(crate::theme::bold(crate::theme::size::STRONG))
                 .color(p::TEXT),
         );
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -60,12 +59,19 @@ pub fn section(ui: &mut Ui, title: &str, right: impl FnOnce(&mut Ui)) {
 /// for long machine strings (CPU brand, device names) placed at the right of
 /// a section header.
 pub fn caption(ui: &mut Ui, text: &str) {
-    ui.add(egui::Label::new(egui::RichText::new(text).size(9.5).color(p::TEXT_FAINT)).truncate());
+    ui.add(
+        egui::Label::new(
+            egui::RichText::new(text)
+                .size(crate::theme::size::MICRO)
+                .color(p::TEXT_FAINT),
+        )
+        .truncate(),
+    );
 }
 
 /// Small status pill. `color` sets the text and border tint.
 pub fn badge(ui: &mut Ui, text: &str, color: Color32) -> Response {
-    let font = FontId::proportional(10.5);
+    let font = crate::theme::bold(crate::theme::size::MICRO);
     let galley = ui.painter().layout_no_wrap(text.to_owned(), font, color);
     let size = Vec2::new(galley.size().x + 14.0, 17.0);
     let (rect, resp) = ui.allocate_exact_size(size, Sense::hover());
@@ -92,6 +98,161 @@ pub fn dot(ui: &mut Ui, color: Color32, glow: bool) -> Response {
     resp
 }
 
+/// Navigation icons, drawn as geometry so every item has identical weight,
+/// optical size and colour.
+///
+/// Unicode icons are a trap here: `⚙` and `▶` are claimed by the emoji font on
+/// Windows and render as full-colour emoji, while `▤` and `◉` fall back to a
+/// monochrome text face. The result is a rail where two items glow purple and
+/// blue and the rest are grey. Painting the shapes removes the whole class of
+/// problem, needs no font, and scales cleanly at any DPI.
+pub fn nav_icon(ui: &Ui, center: Pos2, tab: crate::state::Tab, color: Color32) {
+    use crate::state::Tab;
+
+    let painter = ui.painter();
+    let stroke = Stroke::new(1.3, color);
+    let r = 5.5; // half extent of the icon box
+
+    match tab {
+        Tab::Processes => {
+            // Three stacked rows with a leading dot: a process list.
+            for i in 0..3 {
+                let y = center.y + (i as f32 - 1.0) * 3.4;
+                painter.rect_filled(
+                    Rect::from_center_size(egui::pos2(center.x - 3.6, y), Vec2::splat(1.6)),
+                    0.8,
+                    color,
+                );
+                painter.line_segment(
+                    [
+                        egui::pos2(center.x - 1.6, y),
+                        egui::pos2(center.x + r - 0.4, y),
+                    ],
+                    Stroke::new(1.2, color),
+                );
+            }
+        }
+        Tab::Performance => {
+            // Three bars of increasing height: a chart.
+            let heights = [4.0f32, 7.5, 10.5];
+            for (i, h) in heights.iter().enumerate() {
+                let x = center.x - 4.0 + i as f32 * 4.0;
+                painter.rect_filled(
+                    Rect::from_min_max(
+                        egui::pos2(x, center.y + r - h),
+                        egui::pos2(x + 2.2, center.y + r),
+                    ),
+                    0.8,
+                    color,
+                );
+            }
+        }
+        Tab::Sensors => {
+            // A thermometer: outlined stem plus a filled bulb, sized to match
+            // the other icons. The first version used a 1.6 px stem with no
+            // outline and read as a stray tick mark.
+            let stem =
+                Rect::from_center_size(egui::pos2(center.x, center.y - 1.4), Vec2::new(4.2, 8.4));
+            painter.rect(
+                stem,
+                CornerRadius::same(2),
+                Color32::TRANSPARENT,
+                stroke,
+                StrokeKind::Inside,
+            );
+            painter.circle_filled(egui::pos2(center.x, center.y + 3.4), 3.1, color);
+            painter.circle_stroke(egui::pos2(center.x, center.y + 3.4), 3.1, stroke);
+            painter.line_segment(
+                [
+                    egui::pos2(center.x, center.y - 3.0),
+                    egui::pos2(center.x, center.y + 2.0),
+                ],
+                Stroke::new(1.3, color),
+            );
+        }
+        Tab::Alerts => {
+            // A warning triangle drawn as three lines.
+            let top = egui::pos2(center.x, center.y - r);
+            let left = egui::pos2(center.x - r, center.y + r - 1.0);
+            let right = egui::pos2(center.x + r, center.y + r - 1.0);
+            painter.add(egui::Shape::closed_line(
+                vec![top, left, right],
+                Stroke::new(1.2, color),
+            ));
+            painter.line_segment(
+                [
+                    egui::pos2(center.x, center.y - 1.4),
+                    egui::pos2(center.x, center.y + 1.6),
+                ],
+                Stroke::new(1.2, color),
+            );
+            painter.circle_filled(egui::pos2(center.x, center.y + 3.4), 0.9, color);
+        }
+        Tab::Services => {
+            // A gear: hub plus eight teeth, so it reads as a gear without a
+            // font glyph.
+            painter.circle_stroke(center, 3.0, stroke);
+            painter.circle_filled(center, 1.0, color);
+            for i in 0..8 {
+                let a = std::f32::consts::TAU * i as f32 / 8.0;
+                let (sin, cos) = a.sin_cos();
+                painter.line_segment(
+                    [
+                        egui::pos2(center.x + cos * 3.0, center.y + sin * 3.0),
+                        egui::pos2(center.x + cos * 5.2, center.y + sin * 5.2),
+                    ],
+                    Stroke::new(1.2, color),
+                );
+            }
+        }
+        Tab::Startup => {
+            // An arrow leaving a baseline: "starts at logon".
+            painter.line_segment(
+                [
+                    egui::pos2(center.x - 4.5, center.y + 4.5),
+                    egui::pos2(center.x + 3.5, center.y + 4.5),
+                ],
+                Stroke::new(1.2, color),
+            );
+            painter.line_segment(
+                [
+                    egui::pos2(center.x - 1.0, center.y + 1.0),
+                    egui::pos2(center.x + 4.0, center.y - 4.0),
+                ],
+                Stroke::new(1.4, color),
+            );
+            painter.line_segment(
+                [
+                    egui::pos2(center.x + 0.6, center.y - 4.0),
+                    egui::pos2(center.x + 4.0, center.y - 4.0),
+                ],
+                Stroke::new(1.4, color),
+            );
+            painter.line_segment(
+                [
+                    egui::pos2(center.x + 4.0, center.y - 4.0),
+                    egui::pos2(center.x + 4.0, center.y - 0.6),
+                ],
+                Stroke::new(1.4, color),
+            );
+        }
+        Tab::Users => {
+            // A head and shoulders.
+            painter.circle_stroke(egui::pos2(center.x, center.y - 2.4), 2.4, stroke);
+            painter.add(egui::Shape::line(
+                vec![
+                    egui::pos2(center.x - 4.4, center.y + r),
+                    egui::pos2(center.x - 3.0, center.y + 2.2),
+                    egui::pos2(center.x, center.y + 1.2),
+                    egui::pos2(center.x + 3.0, center.y + 2.2),
+                    egui::pos2(center.x + 4.4, center.y + r),
+                ],
+                Stroke::new(1.2, color),
+            ));
+        }
+    }
+}
+
 /// Big numeric tile: mono value, small unit, label above, context below.
 pub fn tile(
     ui: &mut Ui,
@@ -114,10 +275,9 @@ pub fn tile(
             ui.horizontal(|ui| {
                 ui.label(
                     egui::RichText::new(label.to_uppercase())
-                        .size(9.5)
+                        .font(crate::theme::bold(crate::theme::size::MICRO))
                         .extra_letter_spacing(1.0)
-                        .color(p::TEXT_FAINT)
-                        .strong(),
+                        .color(p::TEXT_FAINT),
                 );
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     dot(ui, accent, fraction.is_some_and(|f| f > 0.55));
@@ -127,14 +287,14 @@ pub fn tile(
                 ui.spacing_mut().item_spacing.x = 3.0;
                 ui.label(
                     egui::RichText::new(value)
-                        .size(22.0)
+                        .size(crate::theme::size::METRIC)
                         .monospace()
                         .color(p::TEXT),
                 );
                 if !unit.is_empty() {
                     ui.label(
                         egui::RichText::new(unit)
-                            .size(10.5)
+                            .size(crate::theme::size::SMALL)
                             .color(p::TEXT_DIM)
                             .monospace(),
                     );
@@ -144,7 +304,11 @@ pub fn tile(
                 meter(ui, frac, accent, 3.0);
             }
             if !sub.is_empty() {
-                ui.label(egui::RichText::new(sub).size(10.0).color(p::TEXT_FAINT));
+                ui.label(
+                    egui::RichText::new(sub)
+                        .size(crate::theme::size::SMALL)
+                        .color(p::TEXT_FAINT),
+                );
             }
         });
 }
@@ -179,7 +343,7 @@ pub fn bar_row(ui: &mut Ui, label: &str, fraction: f32, text: &str, color: Color
             [34.0, 14.0],
             egui::Label::new(
                 egui::RichText::new(label)
-                    .size(10.0)
+                    .size(crate::theme::size::SMALL)
                     .monospace()
                     .color(p::TEXT_DIM),
             ),
@@ -197,7 +361,7 @@ pub fn bar_row(ui: &mut Ui, label: &str, fraction: f32, text: &str, color: Color
             [50.0, 14.0],
             egui::Label::new(
                 egui::RichText::new(text)
-                    .size(10.0)
+                    .size(crate::theme::size::SMALL)
                     .monospace()
                     .color(p::TEXT_DIM),
             ),
@@ -208,11 +372,15 @@ pub fn bar_row(ui: &mut Ui, label: &str, fraction: f32, text: &str, color: Color
 /// Key/value line with the value right-aligned in monospace.
 pub fn kv_row(ui: &mut Ui, key: &str, value: &str) {
     ui.horizontal(|ui| {
-        ui.label(egui::RichText::new(key).size(10.5).color(p::TEXT_FAINT));
+        ui.label(
+            egui::RichText::new(key)
+                .size(crate::theme::size::SMALL)
+                .color(p::TEXT_FAINT),
+        );
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             ui.label(
                 egui::RichText::new(value)
-                    .size(10.5)
+                    .size(crate::theme::size::SMALL)
                     .monospace()
                     .color(p::TEXT_DIM),
             );
@@ -267,7 +435,7 @@ pub fn sparkline(
             rect.left_center() + egui::vec2(8.0, 0.0),
             Align2::LEFT_CENTER,
             format!("{label}: waiting for data"),
-            FontId::proportional(10.5),
+            crate::theme::bold(crate::theme::size::SMALL),
             p::TEXT_FAINT,
         );
         return;
@@ -318,7 +486,7 @@ pub fn sparkline(
                 value_text.to_string()
             }
         ),
-        FontId::monospace(10.0),
+        FontId::monospace(crate::theme::size::MICRO),
         p::TEXT_DIM,
     );
 
@@ -350,10 +518,18 @@ pub fn framed(ui: &mut Ui, add: impl FnOnce(&mut Ui)) {
 pub fn empty_state(ui: &mut Ui, title: &str, detail: &str) {
     ui.add_space(18.0);
     ui.vertical_centered(|ui| {
-        ui.label(egui::RichText::new(title).size(12.5).color(p::TEXT_DIM));
+        ui.label(
+            egui::RichText::new(title)
+                .size(crate::theme::size::STRONG)
+                .color(p::TEXT_DIM),
+        );
         if !detail.is_empty() {
             ui.add_space(2.0);
-            ui.label(egui::RichText::new(detail).size(10.5).color(p::TEXT_FAINT));
+            ui.label(
+                egui::RichText::new(detail)
+                    .size(crate::theme::size::SMALL)
+                    .color(p::TEXT_FAINT),
+            );
         }
     });
     ui.add_space(18.0);

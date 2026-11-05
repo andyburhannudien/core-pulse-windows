@@ -10,6 +10,7 @@
 
 mod elevate;
 mod format;
+mod icons;
 mod state;
 mod theme;
 mod widgets;
@@ -323,10 +324,13 @@ impl App {
                     );
                     ui.vertical(|ui| {
                         ui.spacing_mut().item_spacing.y = 0.0;
-                        ui.label(RichText::new("core-pulse").size(12.5).strong());
+                        ui.label(
+                            RichText::new("core-pulse")
+                                .font(crate::theme::bold(crate::theme::size::STRONG)),
+                        );
                         ui.label(
                             RichText::new("SYSTEM MONITOR")
-                                .size(8.0)
+                                .size(crate::theme::size::MICRO)
                                 .extra_letter_spacing(1.2)
                                 .color(p::TEXT_FAINT),
                         );
@@ -354,7 +358,7 @@ impl App {
                                 "standard user"
                             }
                         ))
-                        .size(9.5)
+                        .size(crate::theme::size::MICRO)
                         .color(p::TEXT_FAINT),
                     );
                     ui.label(
@@ -363,7 +367,7 @@ impl App {
                             s.host.logical_cores,
                             format::bytes(s.host.total_ram_bytes)
                         ))
-                        .size(9.5)
+                        .size(crate::theme::size::MICRO)
                         .color(p::TEXT_FAINT),
                     );
                     ui.add_space(6.0);
@@ -375,7 +379,7 @@ impl App {
                             widgets::dot(ui, p::AMBER, true);
                             ui.label(
                                 RichText::new(format!("{active} active alert(s)"))
-                                    .size(10.0)
+                                    .size(crate::theme::size::SMALL)
                                     .color(p::AMBER),
                             );
                         });
@@ -384,7 +388,7 @@ impl App {
                             widgets::dot(ui, p::GREEN, false);
                             ui.label(
                                 RichText::new("All thresholds nominal")
-                                    .size(10.0)
+                                    .size(crate::theme::size::SMALL)
                                     .color(p::TEXT_FAINT),
                             );
                         });
@@ -419,8 +423,10 @@ impl App {
                 p::ACCENT,
             );
         } else if resp.hovered() {
+            // Hover must not look like selection: no left accent bar, and a
+            // dimmer fill than the selected state.
             ui.painter()
-                .rect_filled(rect, CornerRadius::same(5), p::HOVER);
+                .rect_filled(rect, CornerRadius::same(5), p::HOVER.gamma_multiply(0.7));
         }
 
         let text_color = if selected {
@@ -431,12 +437,15 @@ impl App {
             p::TEXT_DIM
         };
 
-        ui.painter().text(
-            egui::pos2(rect.left() + 12.0, rect.center().y),
-            egui::Align2::LEFT_CENTER,
-            tab.icon(),
-            egui::FontId::proportional(11.0),
-            if selected { p::ACCENT } else { p::TEXT_FAINT },
+        // Icons are painted as geometry, not glyphs. Glyph picks like `⚙` and
+        // `▶` are resolved by the emoji font on Windows and come out as
+        // full-colour emoji, which clashes badly with the monochrome rail.
+        let icon_color = if selected { p::ACCENT } else { p::TEXT_FAINT };
+        widgets::nav_icon(
+            ui,
+            egui::pos2(rect.left() + 17.0, rect.center().y),
+            tab,
+            icon_color,
         );
         ui.painter().text(
             egui::pos2(rect.left() + 30.0, rect.center().y),
@@ -488,10 +497,13 @@ impl App {
                 ui.horizontal(|ui| {
                     ui.vertical(|ui| {
                         ui.spacing_mut().item_spacing.y = 0.0;
-                        ui.label(RichText::new(self.state.tab.label()).size(16.0).strong());
+                        ui.label(
+                            RichText::new(self.state.tab.label())
+                                .font(crate::theme::bold(crate::theme::size::TITLE)),
+                        );
                         ui.label(
                             RichText::new(self.state.tab.hint())
-                                .size(10.0)
+                                .size(crate::theme::size::SMALL)
                                 .color(p::TEXT_FAINT),
                         );
                     });
@@ -501,7 +513,11 @@ impl App {
                     match self.state.tab {
                         Tab::Processes => self.process_toolbar(ui),
                         Tab::Services => {
-                            ui.label(RichText::new("Filter").size(10.5).color(p::TEXT_DIM));
+                            ui.label(
+                                RichText::new("Filter")
+                                    .size(crate::theme::size::SMALL)
+                                    .color(p::TEXT_DIM),
+                            );
                             ui.add(
                                 egui::TextEdit::singleline(&mut self.state.service_search)
                                     .hint_text("service or display name")
@@ -515,7 +531,7 @@ impl App {
                         Tab::Sensors => {
                             ui.checkbox(
                                 &mut self.state.sensor_hot_only,
-                                RichText::new("Only above 45 °C").size(11.0),
+                                RichText::new("Only above 45 °C").size(crate::theme::size::BODY),
                             );
                         }
                         _ => {}
@@ -525,7 +541,7 @@ impl App {
                         let s = &self.state.snapshot;
                         ui.label(
                             RichText::new(format::clock_hms(s.ts_unix_ms))
-                                .size(11.0)
+                                .size(crate::theme::size::BODY)
                                 .monospace()
                                 .color(p::TEXT_FAINT),
                         );
@@ -534,13 +550,13 @@ impl App {
                                 "interval {}",
                                 format::duration_ms(s.interval_ms.max(1) as u64)
                             ))
-                            .size(9.5)
+                            .size(crate::theme::size::MICRO)
                             .color(p::TEXT_FAINT),
                         );
                         ui.separator();
                         ui.label(
                             RichText::new(format!("{} processes", s.processes.len()))
-                                .size(10.0)
+                                .size(crate::theme::size::SMALL)
                                 .color(p::TEXT_DIM),
                         );
                     });
@@ -549,7 +565,11 @@ impl App {
     }
 
     fn process_toolbar(&mut self, ui: &mut egui::Ui) {
-        ui.label(RichText::new("Search").size(10.5).color(p::TEXT_DIM));
+        ui.label(
+            RichText::new("Search")
+                .size(crate::theme::size::SMALL)
+                .color(p::TEXT_DIM),
+        );
         let resp = ui.add(
             egui::TextEdit::singleline(&mut self.state.search)
                 .id_salt("process_search")
@@ -572,11 +592,11 @@ impl App {
         ui.separator();
         ui.checkbox(
             &mut self.state.show_system,
-            RichText::new("System processes").size(11.0),
+            RichText::new("System processes").size(crate::theme::size::BODY),
         );
         ui.checkbox(
             &mut self.state.show_signatures,
-            RichText::new("Signatures").size(11.0),
+            RichText::new("Signatures").size(crate::theme::size::BODY),
         )
         .on_hover_text(
             "Verify the Authenticode signature of each new executable.\n\
@@ -605,10 +625,14 @@ impl App {
                 ui.horizontal_centered(|ui| {
                     if let Some(f) = &self.state.feedback {
                         let color = if f.is_error { p::RED } else { p::GREEN };
-                        let icon = if f.is_error { "✕" } else { "✓" };
+                        let icon = if f.is_error {
+                            icons::CROSS
+                        } else {
+                            icons::CHECK
+                        };
                         ui.label(
                             RichText::new(format!("{icon} {}", f.text))
-                                .size(10.5)
+                                .size(crate::theme::size::SMALL)
                                 .color(color),
                         );
                         ui.separator();
@@ -650,16 +674,21 @@ impl App {
                     if temps.is_empty() {
                         ui.label(
                             RichText::new("TEMP")
-                                .size(9.0)
+                                .size(crate::theme::size::MICRO)
                                 .extra_letter_spacing(0.8)
                                 .color(p::TEXT_FAINT),
                         );
-                        ui.label(RichText::new("—").size(11.0).monospace().color(p::TEXT_DIM))
-                            .on_hover_text(
-                                "No temperature source is active.\n\
+                        ui.label(
+                            RichText::new(icons::DASH)
+                                .size(crate::theme::size::BODY)
+                                .monospace()
+                                .color(p::TEXT_DIM),
+                        )
+                        .on_hover_text(
+                            "No temperature source is active.\n\
                                  ACPI thermal zones are not exposed by this machine's firmware; \
                                  disk temperatures need the elevated helper. Open the Sensors tab.",
-                            );
+                        );
                     } else {
                         // `reduce`, not `fold(f32::MIN, ..)`: MIN is finite and
                         // would print a garbage temperature for an empty list.
@@ -684,7 +713,7 @@ impl App {
                                     s.host.os_build,
                                     format::uptime(s.host.uptime_secs)
                                 ))
-                                .size(9.5)
+                                .size(crate::theme::size::MICRO)
                                 .color(p::TEXT_FAINT),
                             )
                             .truncate(),
@@ -694,7 +723,7 @@ impl App {
                             let n = s.degraded.len();
                             ui.label(
                                 RichText::new(format!("{n} degraded source(s)"))
-                                    .size(9.5)
+                                    .size(crate::theme::size::MICRO)
                                     .color(p::AMBER),
                             )
                             .on_hover_text(
@@ -737,8 +766,16 @@ impl App {
                 ui.horizontal(|ui| {
                     widgets::dot(ui, color, true);
                     let first = &active[0];
-                    ui.label(RichText::new(&first.title).size(11.5).strong().color(color));
-                    ui.label(RichText::new(&first.detail).size(10.5).color(p::TEXT_DIM));
+                    ui.label(
+                        RichText::new(&first.title)
+                            .font(crate::theme::bold(crate::theme::size::BODY))
+                            .color(color),
+                    );
+                    ui.label(
+                        RichText::new(&first.detail)
+                            .size(crate::theme::size::SMALL)
+                            .color(p::TEXT_DIM),
+                    );
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         if ui.small_button("View alerts").clicked() {
                             self.state.tab = Tab::Alerts;
@@ -746,7 +783,7 @@ impl App {
                         if active.len() > 1 {
                             ui.label(
                                 RichText::new(format!("+{} more", active.len() - 1))
-                                    .size(10.0)
+                                    .size(crate::theme::size::SMALL)
                                     .color(p::TEXT_FAINT),
                             );
                         }
@@ -761,11 +798,16 @@ impl App {
 fn status_metric(ui: &mut egui::Ui, key: &str, value: &str, color: Color32) {
     ui.label(
         RichText::new(key)
-            .size(9.0)
+            .size(crate::theme::size::MICRO)
             .extra_letter_spacing(0.8)
             .color(p::TEXT_FAINT),
     );
-    ui.label(RichText::new(value).size(10.5).monospace().color(color));
+    ui.label(
+        RichText::new(value)
+            .size(crate::theme::size::SMALL)
+            .monospace()
+            .color(color),
+    );
 }
 
 impl App {
@@ -820,7 +862,7 @@ impl App {
                             .add(
                                 egui::Button::new(
                                     RichText::new(format!("PID{}", arrow(SortKey::Pid)))
-                                        .size(9.5)
+                                        .size(crate::theme::size::MICRO)
                                         .color(p::TEXT_FAINT),
                                 )
                                 .frame(false),
@@ -835,7 +877,7 @@ impl App {
                             .add(
                                 egui::Button::new(
                                     RichText::new(format!("NAME{}", arrow(SortKey::Name)))
-                                        .size(9.5)
+                                        .size(crate::theme::size::MICRO)
                                         .color(p::TEXT_FAINT),
                                 )
                                 .frame(false),
@@ -848,7 +890,7 @@ impl App {
                     header.col(|ui| {
                         ui.label(
                             RichText::new("EXECUTABLE PATH")
-                                .size(9.5)
+                                .size(crate::theme::size::MICRO)
                                 .color(p::TEXT_FAINT),
                         );
                     });
@@ -857,7 +899,7 @@ impl App {
                             .add(
                                 egui::Button::new(
                                     RichText::new(format!("CPU{}", arrow(SortKey::Cpu)))
-                                        .size(9.5)
+                                        .size(crate::theme::size::MICRO)
                                         .color(p::TEXT_FAINT),
                                 )
                                 .frame(false),
@@ -872,7 +914,7 @@ impl App {
                             .add(
                                 egui::Button::new(
                                     RichText::new(format!("MEMORY{}", arrow(SortKey::Memory)))
-                                        .size(9.5)
+                                        .size(crate::theme::size::MICRO)
                                         .color(p::TEXT_FAINT),
                                 )
                                 .frame(false),
@@ -883,23 +925,47 @@ impl App {
                         }
                     });
                     header.col(|ui| {
-                        ui.label(RichText::new("I/O TOTAL").size(9.5).color(p::TEXT_FAINT));
+                        ui.label(
+                            RichText::new("I/O TOTAL")
+                                .size(crate::theme::size::MICRO)
+                                .color(p::TEXT_FAINT),
+                        );
                     });
                     header.col(|ui| {
-                        ui.label(RichText::new("GPU").size(9.5).color(p::TEXT_FAINT));
+                        ui.label(
+                            RichText::new("GPU")
+                                .size(crate::theme::size::MICRO)
+                                .color(p::TEXT_FAINT),
+                        );
                     });
                     header.col(|ui| {
-                        ui.label(RichText::new("THR").size(9.5).color(p::TEXT_FAINT));
+                        ui.label(
+                            RichText::new("THR")
+                                .size(crate::theme::size::MICRO)
+                                .color(p::TEXT_FAINT),
+                        );
                     });
                     header.col(|ui| {
-                        ui.label(RichText::new("HND").size(9.5).color(p::TEXT_FAINT));
+                        ui.label(
+                            RichText::new("HND")
+                                .size(crate::theme::size::MICRO)
+                                .color(p::TEXT_FAINT),
+                        );
                     });
                     header.col(|ui| {
-                        ui.label(RichText::new("SESSION").size(9.5).color(p::TEXT_FAINT));
+                        ui.label(
+                            RichText::new("SESSION")
+                                .size(crate::theme::size::MICRO)
+                                .color(p::TEXT_FAINT),
+                        );
                     });
                     if show_sig {
                         header.col(|ui| {
-                            ui.label(RichText::new("SIGNATURE").size(9.5).color(p::TEXT_FAINT));
+                            ui.label(
+                                RichText::new("SIGNATURE")
+                                    .size(crate::theme::size::MICRO)
+                                    .color(p::TEXT_FAINT),
+                            );
                         });
                     }
                 })
@@ -912,7 +978,7 @@ impl App {
                         row.col(|ui| {
                             ui.label(
                                 RichText::new(proc.pid.to_string())
-                                    .size(10.0)
+                                    .size(crate::theme::size::SMALL)
                                     .monospace()
                                     .color(p::TEXT_FAINT),
                             );
@@ -939,7 +1005,7 @@ impl App {
                                 }
                                 let label = ui.label(
                                     RichText::new(format::truncate(&proc.name, 58))
-                                        .size(12.0)
+                                        .size(crate::theme::size::BODY)
                                         .color(color),
                                 );
                                 label.context_menu(|ui| {
@@ -961,7 +1027,7 @@ impl App {
                                     ui.add(
                                         egui::Label::new(
                                             RichText::new(format::middle_truncate(&text, 72))
-                                                .size(9.5)
+                                                .size(crate::theme::size::MICRO)
                                                 .monospace()
                                                 .color(p::TEXT_FAINT),
                                         )
@@ -970,11 +1036,15 @@ impl App {
                                     .on_hover_text(&text);
                                 }
                                 None => {
-                                    ui.label(RichText::new("—").size(9.5).color(p::TEXT_FAINT))
-                                        .on_hover_text(
-                                            "Path not readable. Reading the image path of another \
+                                    ui.label(
+                                        RichText::new(icons::DASH)
+                                            .size(crate::theme::size::MICRO)
+                                            .color(p::TEXT_FAINT),
+                                    )
+                                    .on_hover_text(
+                                        "Path not readable. Reading the image path of another \
                                              user's process needs administrator rights.",
-                                        );
+                                    );
                                 }
                             }
                         });
@@ -996,7 +1066,7 @@ impl App {
                                     [34.0, 14.0],
                                     egui::Label::new(
                                         RichText::new(format!("{pct:.1}"))
-                                            .size(10.5)
+                                            .size(crate::theme::size::SMALL)
                                             .monospace()
                                             .color(color),
                                     ),
@@ -1028,11 +1098,15 @@ impl App {
                                 ui.spacing_mut().item_spacing.x = 3.0;
                                 ui.label(
                                     RichText::new(digits)
-                                        .size(10.5)
+                                        .size(crate::theme::size::SMALL)
                                         .monospace()
                                         .color(p::TEXT_DIM),
                                 );
-                                ui.label(RichText::new(unit).size(9.0).color(p::TEXT_FAINT));
+                                ui.label(
+                                    RichText::new(unit)
+                                        .size(crate::theme::size::MICRO)
+                                        .color(p::TEXT_FAINT),
+                                );
                             });
                         });
                         row.col(|ui| {
@@ -1043,7 +1117,7 @@ impl App {
                                 } else {
                                     format::bytes(io)
                                 })
-                                .size(10.0)
+                                .size(crate::theme::size::SMALL)
                                 .monospace()
                                 .color(p::TEXT_FAINT),
                             )
@@ -1057,19 +1131,23 @@ impl App {
                             Some(g) => {
                                 ui.label(
                                     RichText::new(format!("{g:.1}%"))
-                                        .size(10.0)
+                                        .size(crate::theme::size::SMALL)
                                         .monospace()
                                         .color(p::CYAN),
                                 );
                             }
                             None => {
-                                ui.label(RichText::new("—").size(10.0).color(p::TEXT_FAINT));
+                                ui.label(
+                                    RichText::new(icons::DASH)
+                                        .size(crate::theme::size::SMALL)
+                                        .color(p::TEXT_FAINT),
+                                );
                             }
                         });
                         row.col(|ui| {
                             ui.label(
                                 RichText::new(proc.threads.to_string())
-                                    .size(10.0)
+                                    .size(crate::theme::size::SMALL)
                                     .monospace()
                                     .color(p::TEXT_FAINT),
                             );
@@ -1077,7 +1155,7 @@ impl App {
                         row.col(|ui| {
                             ui.label(
                                 RichText::new(proc.handles.to_string())
-                                    .size(10.0)
+                                    .size(crate::theme::size::SMALL)
                                     .monospace()
                                     .color(p::TEXT_FAINT),
                             );
@@ -1085,7 +1163,7 @@ impl App {
                         row.col(|ui| {
                             ui.label(
                                 RichText::new(proc.session_id.to_string())
-                                    .size(10.0)
+                                    .size(crate::theme::size::SMALL)
                                     .monospace()
                                     .color(p::TEXT_FAINT),
                             );
@@ -1095,17 +1173,17 @@ impl App {
                                 Some(sig) => {
                                     let (icon, color, tip) = match sig.status {
                                         core_pulse_core::model::SigStatus::Valid => (
-                                            "✓",
+                                            icons::CHECK,
                                             p::GREEN,
                                             sig.publisher
                                                 .clone()
                                                 .unwrap_or_else(|| "signed".into()),
                                         ),
                                         core_pulse_core::model::SigStatus::Invalid => {
-                                            ("✕", p::RED, "signature invalid".into())
+                                            (icons::CROSS, p::RED, "signature invalid".into())
                                         }
                                         core_pulse_core::model::SigStatus::Unsigned => {
-                                            ("·", p::TEXT_FAINT, "not signed".into())
+                                            (icons::DASH, p::TEXT_FAINT, "not signed".into())
                                         }
                                         core_pulse_core::model::SigStatus::Unknown => {
                                             ("?", p::TEXT_FAINT, "not yet verified".into())
@@ -1115,7 +1193,7 @@ impl App {
                                         .on_hover_text(tip);
                                 }
                                 None => {
-                                    ui.label(RichText::new("…").color(p::TEXT_FAINT))
+                                    ui.label(RichText::new(icons::PENDING).color(p::TEXT_FAINT))
                                         .on_hover_text("waiting for verification");
                                 }
                             });
@@ -1179,10 +1257,13 @@ impl App {
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
                     widgets::dot(ui, p::ACCENT, false);
-                    ui.label(RichText::new(&row.name).size(12.5).strong());
+                    ui.label(
+                        RichText::new(&row.name)
+                            .font(crate::theme::bold(crate::theme::size::STRONG)),
+                    );
                     ui.label(
                         RichText::new(format!("PID {}", row.pid))
-                            .size(10.5)
+                            .size(crate::theme::size::SMALL)
                             .monospace()
                             .color(p::TEXT_DIM),
                     );
@@ -1207,12 +1288,18 @@ impl App {
                             ui.add_sized(
                                 [118.0, 15.0],
                                 egui::Label::new(
-                                    RichText::new(label).size(10.0).color(p::TEXT_FAINT),
+                                    RichText::new(label)
+                                        .size(crate::theme::size::SMALL)
+                                        .color(p::TEXT_FAINT),
                                 ),
                             );
                             ui.add(
-                                egui::Label::new(RichText::new(value).size(10.5).monospace())
-                                    .wrap(),
+                                egui::Label::new(
+                                    RichText::new(value)
+                                        .size(crate::theme::size::SMALL)
+                                        .monospace(),
+                                )
+                                .wrap(),
                             );
                         });
                     };
@@ -1486,7 +1573,7 @@ impl App {
                 widgets::section(ui, "Memory pressure", |ui| {
                     ui.label(
                         RichText::new(format!("{mem_pct:.0}%"))
-                            .size(10.0)
+                            .size(crate::theme::size::SMALL)
                             .monospace()
                             .color(p::GREEN),
                     );
@@ -1498,7 +1585,7 @@ impl App {
                 widgets::section(ui, "Disk activity", |ui| {
                     ui.label(
                         RichText::new(format!("{disk_busy:.0}% busiest"))
-                            .size(9.5)
+                            .size(crate::theme::size::MICRO)
                             .color(p::TEXT_FAINT),
                     );
                 });
@@ -1507,7 +1594,7 @@ impl App {
                 widgets::section(ui, "Network throughput", |ui| {
                     ui.label(
                         RichText::new(format::rate(net_now))
-                            .size(9.5)
+                            .size(crate::theme::size::MICRO)
                             .color(p::CYAN),
                     );
                 });
@@ -1523,7 +1610,7 @@ impl App {
                 widgets::section(ui, "Logical processors", |ui| {
                     ui.label(
                         RichText::new(format!("{:.0}% total", s.cpu.total_percent))
-                            .size(9.5)
+                            .size(crate::theme::size::MICRO)
                             .color(p::TEXT_DIM),
                     );
                 });
@@ -1569,15 +1656,15 @@ impl App {
                 widgets::section(ui, "Volumes", |ui| {
                     ui.label(
                         RichText::new(format!("{} mounted", s.volumes.len()))
-                            .size(9.5)
+                            .size(crate::theme::size::MICRO)
                             .color(p::TEXT_FAINT),
                     );
                 });
                 ui.add_space(4.0);
                 if s.volumes.is_empty() {
                     ui.label(
-                        RichText::new("— no mounted volume reported")
-                            .size(10.0)
+                        RichText::new(format!("{} no mounted volume reported", icons::DASH))
+                            .size(crate::theme::size::SMALL)
                             .color(p::TEXT_FAINT),
                     );
                 }
@@ -1600,7 +1687,7 @@ impl App {
                             [38.0, 14.0],
                             egui::Label::new(
                                 RichText::new(&v.mount)
-                                    .size(10.0)
+                                    .size(crate::theme::size::SMALL)
                                     .monospace()
                                     .color(p::TEXT),
                             ),
@@ -1620,7 +1707,7 @@ impl App {
                         );
                         ui.label(
                             RichText::new(format!("{} free", format::bytes(v.free_bytes)))
-                                .size(9.5)
+                                .size(crate::theme::size::MICRO)
                                 .monospace()
                                 .color(p::TEXT_FAINT),
                         )
@@ -1640,7 +1727,7 @@ impl App {
                 widgets::section(ui, "Memory composition", |ui| {
                     ui.label(
                         RichText::new(format::bytes(s.memory.total_bytes))
-                            .size(9.5)
+                            .size(crate::theme::size::MICRO)
                             .monospace()
                             .color(p::TEXT_DIM),
                     );
@@ -1678,7 +1765,7 @@ impl App {
                 widgets::section(ui, "Disks", |ui| {
                     ui.label(
                         RichText::new("read · write · queue")
-                            .size(9.0)
+                            .size(crate::theme::size::MICRO)
                             .color(p::TEXT_FAINT),
                     );
                 });
@@ -1700,18 +1787,17 @@ impl App {
                         );
                         ui.label(
                             RichText::new(format::truncate(&d.model, 30))
-                                .size(11.0)
-                                .strong(),
+                                .font(crate::theme::bold(crate::theme::size::BODY)),
                         );
                         ui.label(
                             RichText::new(format!("{:?}", d.media))
-                                .size(9.0)
+                                .size(crate::theme::size::MICRO)
                                 .color(p::TEXT_FAINT),
                         );
                         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                             ui.label(
                                 RichText::new(format!("{:.0}%", d.busy_percent))
-                                    .size(10.0)
+                                    .size(crate::theme::size::SMALL)
                                     .monospace()
                                     .color(p::AMBER),
                             );
@@ -1726,7 +1812,7 @@ impl App {
                             d.queue_depth,
                             d.avg_response_ms
                         ))
-                        .size(9.5)
+                        .size(crate::theme::size::MICRO)
                         .color(p::TEXT_FAINT),
                     );
                 }
@@ -1736,7 +1822,7 @@ impl App {
                 widgets::section(ui, "GPUs", |ui| {
                     ui.label(
                         RichText::new("utilization · memory")
-                            .size(9.0)
+                            .size(crate::theme::size::MICRO)
                             .color(p::TEXT_FAINT),
                     );
                 });
@@ -1749,8 +1835,7 @@ impl App {
                         widgets::dot(ui, p::PURPLE, false);
                         ui.label(
                             RichText::new(format::truncate(&g.name, 30))
-                                .size(11.0)
-                                .strong(),
+                                .font(crate::theme::bold(crate::theme::size::BODY)),
                         );
                     });
                     let util = g.utilization_percent.unwrap_or(0.0);
@@ -1767,7 +1852,7 @@ impl App {
                     };
                     ui.label(
                         RichText::new(format!("{mem} · temp {}", format::temp_c(g.temperature_c)))
-                            .size(9.5)
+                            .size(crate::theme::size::MICRO)
                             .color(p::TEXT_FAINT),
                     );
                 }
@@ -1780,9 +1865,15 @@ impl App {
                 widgets::section(ui, "Degraded sources", |_| {});
                 for d in &s.degraded {
                     ui.label(
-                        RichText::new(format!("• {:?} ({:?}): {}", d.area, d.reason, d.detail))
-                            .size(10.0)
-                            .color(p::TEXT_DIM),
+                        RichText::new(format!(
+                            "{} {:?} ({:?}): {}",
+                            icons::BULLET,
+                            d.area,
+                            d.reason,
+                            d.detail
+                        ))
+                        .size(crate::theme::size::SMALL)
+                        .color(p::TEXT_DIM),
                     );
                 }
             });
@@ -1868,7 +1959,7 @@ impl App {
                 widgets::section(ui, "Temperature", |ui| {
                     ui.label(
                         RichText::new(format!("{} reading(s)", temps.len()))
-                            .size(9.5)
+                            .size(crate::theme::size::MICRO)
                             .color(p::TEXT_FAINT),
                     );
                 });
@@ -1901,14 +1992,13 @@ impl App {
                         ui.horizontal(|ui| {
                             ui.label(
                                 RichText::new(step)
-                                    .size(10.5)
-                                    .color(p::TEXT_DIM)
-                                    .strong(),
+                                    .font(crate::theme::bold(crate::theme::size::SMALL))
+                                    .color(p::TEXT_DIM),
                             );
                         });
                         ui.label(
                             RichText::new(detail)
-                                .size(9.5)
+                                .size(crate::theme::size::MICRO)
                                 .color(p::TEXT_FAINT),
                         );
                         ui.add_space(3.0);
@@ -1921,7 +2011,7 @@ impl App {
                     widgets::section(ui, "History", |ui| {
                         ui.label(
                             RichText::new("average of all sensors · 60 s")
-                                .size(9.0)
+                                .size(crate::theme::size::MICRO)
                                 .color(p::TEXT_FAINT),
                         );
                     });
@@ -1946,13 +2036,11 @@ impl App {
                     };
                     ui.horizontal(|ui| {
                         widgets::dot(ui, color, false);
-                        ui.label(RichText::new(format::truncate(&r.label, 34)).size(11.0));
+                        ui.label(RichText::new(format::truncate(&r.label, 34)).size(crate::theme::size::BODY));
                         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                             ui.label(
                                 RichText::new(format!("{:.1} °C", r.value))
-                                    .size(12.0)
-                                    .monospace()
-                                    .strong()
+                                    .font(crate::theme::bold_mono(crate::theme::size::BODY))
                                     .color(color),
                             );
                             let (mark, tip) = match r.confidence {
@@ -1960,14 +2048,20 @@ impl App {
                                     ("", "read directly from a hardware sensor")
                                 }
                                 core_pulse_core::model::Confidence::Derived => {
-                                    ("≈", "derived (ACPI zone, not die temperature)")
+                                    (
+                                        icons::APPROX,
+                                        "derived (ACPI zone, not die temperature)",
+                                    )
                                 }
                                 core_pulse_core::model::Confidence::ThirdParty => {
-                                    ("◇", "third party (LibreHardwareMonitor)")
+                                    (
+                                        icons::THIRD_PARTY,
+                                        "third party (LibreHardwareMonitor)",
+                                    )
                                 }
                             };
                             if !mark.is_empty() {
-                                ui.label(RichText::new(mark).size(10.0).color(p::TEXT_FAINT))
+                                ui.label(RichText::new(mark).size(crate::theme::size::SMALL).color(p::TEXT_FAINT))
                                     .on_hover_text(tip);
                             }
                         });
@@ -1979,7 +2073,7 @@ impl App {
                             "source {:?} · min {:.0} · max {:.0} · avg {:.0}",
                             r.source, r.min, r.max, r.avg
                         ))
-                        .size(9.0)
+                        .size(crate::theme::size::MICRO)
                         .color(p::TEXT_FAINT),
                     );
                 }
@@ -1997,7 +2091,7 @@ impl App {
                             "{available}/{} available",
                             s.sensor_status.len()
                         ))
-                        .size(9.5)
+                        .size(crate::theme::size::MICRO)
                         .color(p::TEXT_FAINT),
                     );
                 });
@@ -2025,19 +2119,28 @@ impl App {
                             [96.0, 15.0],
                             egui::Label::new(
                                 RichText::new(&st.provider)
-                                    .size(10.5)
+                                    .size(crate::theme::size::SMALL)
                                     .monospace()
                                     .color(p::TEXT_DIM),
                             ),
                         );
-                        ui.label(RichText::new(text).size(10.5).color(dot_color));
+                        ui.label(RichText::new(text).size(crate::theme::size::SMALL).color(dot_color));
                     });
                     if !detail.is_empty() {
-                        ui.label(
-                            RichText::new(format!("   {detail}"))
-                                .size(9.5)
-                                .color(p::TEXT_FAINT),
-                        );
+                        // Indent to align with the provider name, not with the
+                        // dot. Raw leading spaces are fragile because they
+                        // depend on the font's space width.
+                        ui.horizontal(|ui| {
+                            ui.add_space(18.0);
+                            ui.add(
+                                egui::Label::new(
+                                    RichText::new(detail)
+                                        .size(crate::theme::size::MICRO)
+                                        .color(p::TEXT_FAINT),
+                                )
+                                .wrap(),
+                            );
+                        });
                     }
                 }
 
@@ -2063,7 +2166,7 @@ impl App {
                          • Enable the LibreHardwareMonitor bridge if you already run it.\n\n\
                          No estimated values are shown. A missing number is better than a wrong one.",
                     )
-                    .size(10.0)
+                    .size(crate::theme::size::SMALL)
                     .color(p::TEXT_DIM),
                 );
             });
@@ -2077,8 +2180,11 @@ impl App {
                     .collect();
                 if others.is_empty() {
                     ui.label(
-                        RichText::new("— no fan, voltage, power or wear sensor reported")
-                            .size(10.0)
+                        RichText::new(format!(
+                            "{} no fan, voltage, power or wear sensor reported",
+                            icons::DASH
+                        ))
+                            .size(crate::theme::size::SMALL)
                             .color(p::TEXT_FAINT),
                     );
                 }
@@ -2086,14 +2192,14 @@ impl App {
                     ui.horizontal(|ui| {
                         ui.label(
                             RichText::new(format::truncate(&r.label, 40))
-                                .size(10.0)
+                                .size(crate::theme::size::SMALL)
                                 .monospace()
                                 .color(p::TEXT_DIM),
                         );
                         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                             ui.label(
                                 RichText::new(format!("{:.0} {:?}", r.value, r.unit))
-                                    .size(10.0)
+                                    .size(crate::theme::size::SMALL)
                                     .monospace(),
                             );
                         });
@@ -2130,7 +2236,7 @@ impl App {
                     widgets::dot(ui, p::GREEN, true);
                     ui.label(
                         RichText::new("Helper active (elevated)")
-                            .size(10.5)
+                            .size(crate::theme::size::SMALL)
                             .color(p::GREEN),
                     );
                 });
@@ -2140,7 +2246,7 @@ impl App {
                     widgets::dot(ui, p::AMBER, true);
                     ui.label(
                         RichText::new("Helper not running — disk SMART needs elevation")
-                            .size(10.5)
+                            .size(crate::theme::size::SMALL)
                             .color(p::AMBER),
                     );
                 });
@@ -2150,7 +2256,7 @@ impl App {
                     widgets::dot(ui, p::RED, false);
                     ui.label(
                         RichText::new(format!("Helper error — {error}"))
-                            .size(10.5)
+                            .size(crate::theme::size::SMALL)
                             .color(p::RED),
                     );
                 });
@@ -2160,7 +2266,7 @@ impl App {
                     widgets::dot(ui, p::TEXT_FAINT, false);
                     ui.label(
                         RichText::new(format!("Helper unavailable — {reason}"))
-                            .size(10.5)
+                            .size(crate::theme::size::SMALL)
                             .color(p::TEXT_DIM),
                     );
                 });
@@ -2170,7 +2276,7 @@ impl App {
                     widgets::dot(ui, p::TEXT_FAINT, false);
                     ui.label(
                         RichText::new("Helper status not read yet")
-                            .size(10.5)
+                            .size(crate::theme::size::SMALL)
                             .color(p::TEXT_FAINT),
                     );
                 });
@@ -2251,25 +2357,25 @@ impl App {
         ui.horizontal(|ui| {
             ui.label(
                 RichText::new(format!("{} services", s.services.len()))
-                    .size(10.0)
+                    .size(crate::theme::size::SMALL)
                     .color(p::TEXT_DIM),
             );
             ui.separator();
             ui.label(
                 RichText::new(format!("{running} running"))
-                    .size(10.0)
+                    .size(crate::theme::size::SMALL)
                     .color(p::GREEN),
             );
             ui.separator();
             ui.label(
                 RichText::new(format!("{disabled} disabled"))
-                    .size(10.0)
+                    .size(crate::theme::size::SMALL)
                     .color(p::TEXT_FAINT),
             );
             ui.separator();
             ui.label(
                 RichText::new(format!("{} matched", rows.len()))
-                    .size(10.0)
+                    .size(crate::theme::size::SMALL)
                     .color(p::TEXT_FAINT),
             );
         });
@@ -2290,19 +2396,39 @@ impl App {
                 .max_scroll_height(avail - 2.0)
                 .header(24.0, |mut h| {
                     h.col(|ui| {
-                        ui.label(RichText::new("SERVICE").size(9.5).color(p::TEXT_FAINT));
+                        ui.label(
+                            RichText::new("SERVICE")
+                                .size(crate::theme::size::MICRO)
+                                .color(p::TEXT_FAINT),
+                        );
                     });
                     h.col(|ui| {
-                        ui.label(RichText::new("DISPLAY NAME").size(9.5).color(p::TEXT_FAINT));
+                        ui.label(
+                            RichText::new("DISPLAY NAME")
+                                .size(crate::theme::size::MICRO)
+                                .color(p::TEXT_FAINT),
+                        );
                     });
                     h.col(|ui| {
-                        ui.label(RichText::new("STATE").size(9.5).color(p::TEXT_FAINT));
+                        ui.label(
+                            RichText::new("STATE")
+                                .size(crate::theme::size::MICRO)
+                                .color(p::TEXT_FAINT),
+                        );
                     });
                     h.col(|ui| {
-                        ui.label(RichText::new("STARTUP").size(9.5).color(p::TEXT_FAINT));
+                        ui.label(
+                            RichText::new("STARTUP")
+                                .size(crate::theme::size::MICRO)
+                                .color(p::TEXT_FAINT),
+                        );
                     });
                     h.col(|ui| {
-                        ui.label(RichText::new("PID").size(9.5).color(p::TEXT_FAINT));
+                        ui.label(
+                            RichText::new("PID")
+                                .size(crate::theme::size::MICRO)
+                                .color(p::TEXT_FAINT),
+                        );
                     });
                 })
                 .body(|body| {
@@ -2311,14 +2437,15 @@ impl App {
                         row.col(|ui| {
                             ui.label(
                                 RichText::new(format::truncate(&svc.name, 26))
-                                    .size(10.0)
+                                    .size(crate::theme::size::SMALL)
                                     .monospace()
                                     .color(p::TEXT_DIM),
                             );
                         });
                         row.col(|ui| {
                             ui.label(
-                                RichText::new(format::truncate(&svc.display_name, 60)).size(11.0),
+                                RichText::new(format::truncate(&svc.display_name, 60))
+                                    .size(crate::theme::size::BODY),
                             );
                         });
                         row.col(|ui| {
@@ -2330,13 +2457,17 @@ impl App {
                                 };
                             ui.horizontal(|ui| {
                                 widgets::dot(ui, color, false);
-                                ui.label(RichText::new(svc.state.label()).size(10.0).color(color));
+                                ui.label(
+                                    RichText::new(svc.state.label())
+                                        .size(crate::theme::size::SMALL)
+                                        .color(color),
+                                );
                             });
                         });
                         row.col(|ui| {
                             ui.label(
                                 RichText::new(svc.start_type.label())
-                                    .size(10.0)
+                                    .size(crate::theme::size::SMALL)
                                     .color(p::TEXT_DIM),
                             );
                         });
@@ -2347,7 +2478,7 @@ impl App {
                                 } else {
                                     svc.pid.to_string()
                                 })
-                                .size(10.0)
+                                .size(crate::theme::size::SMALL)
                                 .monospace()
                                 .color(p::TEXT_FAINT),
                             );
@@ -2362,7 +2493,7 @@ impl App {
                 "Starting or stopping services requires administrator rights and is not \
                  implemented: the helper protocol is read-only by design.",
             )
-            .size(9.5)
+            .size(crate::theme::size::MICRO)
             .color(p::TEXT_FAINT),
         );
     }
@@ -2381,7 +2512,7 @@ impl App {
         ui.horizontal(|ui| {
             ui.label(
                 RichText::new(format!("{} logon entries", s.startup.len()))
-                    .size(10.0)
+                    .size(crate::theme::size::SMALL)
                     .color(p::TEXT_DIM),
             );
             ui.separator();
@@ -2392,7 +2523,7 @@ impl App {
                 .count();
             ui.label(
                 RichText::new(format!("{missing} missing target(s)"))
-                    .size(10.0)
+                    .size(crate::theme::size::SMALL)
                     .color(if missing > 0 { p::AMBER } else { p::TEXT_FAINT }),
             );
         });
@@ -2412,50 +2543,81 @@ impl App {
                 .max_scroll_height(avail - 2.0)
                 .header(24.0, |mut h| {
                     h.col(|ui| {
-                        ui.label(RichText::new("ENTRY").size(9.5).color(p::TEXT_FAINT));
+                        ui.label(
+                            RichText::new("ENTRY")
+                                .size(crate::theme::size::MICRO)
+                                .color(p::TEXT_FAINT),
+                        );
                     });
                     h.col(|ui| {
-                        ui.label(RichText::new("SOURCE").size(9.5).color(p::TEXT_FAINT));
+                        ui.label(
+                            RichText::new("SOURCE")
+                                .size(crate::theme::size::MICRO)
+                                .color(p::TEXT_FAINT),
+                        );
                     });
                     h.col(|ui| {
-                        ui.label(RichText::new("TARGET").size(9.5).color(p::TEXT_FAINT));
+                        ui.label(
+                            RichText::new("TARGET")
+                                .size(crate::theme::size::MICRO)
+                                .color(p::TEXT_FAINT),
+                        );
                     });
                     h.col(|ui| {
-                        ui.label(RichText::new("32-BIT").size(9.5).color(p::TEXT_FAINT));
+                        ui.label(
+                            RichText::new("32-BIT")
+                                .size(crate::theme::size::MICRO)
+                                .color(p::TEXT_FAINT),
+                        );
                     });
                 })
                 .body(|body| {
                     body.rows(22.0, s.startup.len(), |mut row| {
                         let e = &s.startup[row.index()];
                         row.col(|ui| {
-                            ui.label(RichText::new(format::truncate(&e.name, 64)).size(11.0))
-                                .on_hover_text(&e.command);
+                            ui.label(
+                                RichText::new(format::truncate(&e.name, 64))
+                                    .size(crate::theme::size::BODY),
+                            )
+                            .on_hover_text(&e.command);
                         });
                         row.col(|ui| {
                             ui.label(
                                 RichText::new(e.source.label())
-                                    .size(10.0)
+                                    .size(crate::theme::size::SMALL)
                                     .color(p::TEXT_DIM),
                             );
                         });
                         row.col(|ui| match e.target_exists {
                             Some(true) => {
-                                ui.label(RichText::new("present").size(10.0).color(p::GREEN));
+                                ui.label(
+                                    RichText::new("present")
+                                        .size(crate::theme::size::SMALL)
+                                        .color(p::GREEN),
+                                );
                             }
                             Some(false) => {
-                                ui.label(RichText::new("missing").size(10.0).color(p::RED))
-                                    .on_hover_text(
-                                        "The file this entry references does not exist on disk",
-                                    );
+                                ui.label(
+                                    RichText::new("missing")
+                                        .size(crate::theme::size::SMALL)
+                                        .color(p::RED),
+                                )
+                                .on_hover_text(
+                                    "The file this entry references does not exist on disk",
+                                );
                             }
                             None => {
-                                ui.label(RichText::new("—").size(10.0).color(p::TEXT_FAINT));
+                                ui.label(
+                                    RichText::new(icons::DASH)
+                                        .size(crate::theme::size::SMALL)
+                                        .color(p::TEXT_FAINT),
+                                );
                             }
                         });
                         row.col(|ui| {
                             ui.label(
                                 RichText::new(if e.is_32bit { "yes" } else { "—" })
-                                    .size(10.0)
+                                    .size(crate::theme::size::SMALL)
                                     .color(p::TEXT_FAINT),
                             );
                         });
@@ -2470,7 +2632,7 @@ impl App {
                  target; a missing target usually means the app was uninstalled without cleaning \
                  up its startup entry.",
             )
-            .size(9.5)
+            .size(crate::theme::size::MICRO)
             .color(p::TEXT_FAINT),
         );
     }
@@ -2485,14 +2647,14 @@ impl App {
         ui.horizontal(|ui| {
             ui.label(
                 RichText::new(format!("{} session(s)", s.sessions.len()))
-                    .size(10.0)
+                    .size(crate::theme::size::SMALL)
                     .color(p::TEXT_DIM),
             );
             ui.separator();
             let total: u32 = s.sessions.iter().map(|x| x.process_count).sum();
             ui.label(
                 RichText::new(format!("{total} processes across sessions"))
-                    .size(10.0)
+                    .size(crate::theme::size::SMALL)
                     .color(p::TEXT_FAINT),
             );
         });
@@ -2514,22 +2676,46 @@ impl App {
                 .max_scroll_height(avail - 2.0)
                 .header(24.0, |mut h| {
                     h.col(|ui| {
-                        ui.label(RichText::new("ID").size(9.5).color(p::TEXT_FAINT));
+                        ui.label(
+                            RichText::new("ID")
+                                .size(crate::theme::size::MICRO)
+                                .color(p::TEXT_FAINT),
+                        );
                     });
                     h.col(|ui| {
-                        ui.label(RichText::new("USER").size(9.5).color(p::TEXT_FAINT));
+                        ui.label(
+                            RichText::new("USER")
+                                .size(crate::theme::size::MICRO)
+                                .color(p::TEXT_FAINT),
+                        );
                     });
                     h.col(|ui| {
-                        ui.label(RichText::new("STATE").size(9.5).color(p::TEXT_FAINT));
+                        ui.label(
+                            RichText::new("STATE")
+                                .size(crate::theme::size::MICRO)
+                                .color(p::TEXT_FAINT),
+                        );
                     });
                     h.col(|ui| {
-                        ui.label(RichText::new("PROCESSES").size(9.5).color(p::TEXT_FAINT));
+                        ui.label(
+                            RichText::new("PROCESSES")
+                                .size(crate::theme::size::MICRO)
+                                .color(p::TEXT_FAINT),
+                        );
                     });
                     h.col(|ui| {
-                        ui.label(RichText::new("CPU").size(9.5).color(p::TEXT_FAINT));
+                        ui.label(
+                            RichText::new("CPU")
+                                .size(crate::theme::size::MICRO)
+                                .color(p::TEXT_FAINT),
+                        );
                     });
                     h.col(|ui| {
-                        ui.label(RichText::new("MEMORY").size(9.5).color(p::TEXT_FAINT));
+                        ui.label(
+                            RichText::new("MEMORY")
+                                .size(crate::theme::size::MICRO)
+                                .color(p::TEXT_FAINT),
+                        );
                     });
                 })
                 .body(|body| {
@@ -2538,31 +2724,39 @@ impl App {
                         row.col(|ui| {
                             ui.label(
                                 RichText::new(sess.session_id.to_string())
-                                    .size(10.0)
+                                    .size(crate::theme::size::SMALL)
                                     .monospace()
                                     .color(p::TEXT_FAINT),
                             );
                         });
                         row.col(|ui| match &sess.user {
                             Some(u) => {
-                                ui.label(RichText::new(u).size(11.0));
+                                ui.label(RichText::new(u).size(crate::theme::size::BODY));
                             }
                             None => {
-                                ui.label(RichText::new("—").size(10.0).color(p::TEXT_FAINT))
-                                    .on_hover_text(
-                                        "User name not readable. Processes in this session are owned \
+                                ui.label(
+                                    RichText::new("—")
+                                        .size(crate::theme::size::SMALL)
+                                        .color(p::TEXT_FAINT),
+                                )
+                                .on_hover_text(
+                                    "User name not readable. Processes in this session are owned \
                                          by a system account; reading them requires administrator \
                                          rights (helper).",
-                                    );
+                                );
                             }
                         });
                         row.col(|ui| {
-                            ui.label(RichText::new(&sess.state).size(10.0).color(p::TEXT_DIM));
+                            ui.label(
+                                RichText::new(&sess.state)
+                                    .size(crate::theme::size::SMALL)
+                                    .color(p::TEXT_DIM),
+                            );
                         });
                         row.col(|ui| {
                             ui.label(
                                 RichText::new(sess.process_count.to_string())
-                                    .size(10.0)
+                                    .size(crate::theme::size::SMALL)
                                     .monospace()
                                     .color(p::TEXT_DIM),
                             );
@@ -2570,7 +2764,7 @@ impl App {
                         row.col(|ui| {
                             ui.label(
                                 RichText::new(format::percent0(sess.cpu_percent))
-                                    .size(10.0)
+                                    .size(crate::theme::size::SMALL)
                                     .monospace()
                                     .color(p::TEXT_DIM),
                             );
@@ -2578,7 +2772,7 @@ impl App {
                         row.col(|ui| {
                             ui.label(
                                 RichText::new(format::bytes(sess.mem_private_bytes))
-                                    .size(10.0)
+                                    .size(crate::theme::size::SMALL)
                                     .monospace()
                                     .color(p::TEXT_DIM),
                             );
@@ -2605,10 +2799,13 @@ impl App {
                 ui.set_min_width(400.0);
                 ui.add_space(2.0);
                 ui.horizontal(|ui| {
-                    ui.label(RichText::new(&pending.name).size(13.0).strong());
+                    ui.label(
+                        RichText::new(&pending.name)
+                            .font(crate::theme::bold(crate::theme::size::STRONG)),
+                    );
                     ui.label(
                         RichText::new(format!("PID {}", pending.pid))
-                            .size(10.5)
+                            .size(crate::theme::size::SMALL)
                             .monospace()
                             .color(p::TEXT_DIM),
                     );
@@ -2620,21 +2817,21 @@ impl App {
                             "{} descendant process(es) will also be stopped.",
                             pending.descendants
                         ))
-                        .size(10.5)
+                        .size(crate::theme::size::SMALL)
                         .color(p::AMBER),
                     );
                 }
                 if let PendingKind::SetPriority(priority) = pending.kind {
                     ui.label(
                         RichText::new(format!("New priority: {}", priority.label()))
-                            .size(10.5)
+                            .size(crate::theme::size::SMALL)
                             .color(p::TEXT_DIM),
                     );
                 }
                 if pending.kind.is_destructive() {
                     ui.label(
                         RichText::new("Unsaved data in this process will be lost.")
-                            .size(10.0)
+                            .size(crate::theme::size::SMALL)
                             .color(p::TEXT_FAINT),
                     );
                 }
@@ -2822,7 +3019,7 @@ fn process_context_menu(
         ui.separator();
         ui.label(
             RichText::new("critical process: actions disabled")
-                .size(9.5)
+                .size(crate::theme::size::MICRO)
                 .color(p::TEXT_FAINT),
         );
     }
@@ -2841,16 +3038,19 @@ impl App {
             widgets::card(ui, |ui| {
                 ui.horizontal(|ui| {
                     widgets::dot(ui, p::GREEN, true);
-                    ui.label(RichText::new("No active alerts").size(12.5).strong());
+                    ui.label(
+                        RichText::new("No active alerts")
+                            .font(crate::theme::bold(crate::theme::size::STRONG)),
+                    );
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         ui.label(
                             RichText::new("evaluated every second")
-                                .size(9.5)
+                                .size(crate::theme::size::MICRO)
                                 .color(p::TEXT_FAINT),
                         );
                         ui.label(
                             RichText::new("MONITORING")
-                                .size(9.0)
+                                .size(crate::theme::size::MICRO)
                                 .extra_letter_spacing(1.0)
                                 .color(p::GREEN),
                         );
@@ -2862,7 +3062,7 @@ impl App {
                         "A condition must be sustained before it raises an alert, so a one-second \
                          spike never notifies. Missing sensors never raise an alert at all.",
                     )
-                    .size(10.0)
+                    .size(crate::theme::size::SMALL)
                     .color(p::TEXT_DIM),
                 );
             });
@@ -2878,7 +3078,7 @@ impl App {
                         } else {
                             format!("{firing} firing")
                         })
-                        .size(9.5)
+                        .size(crate::theme::size::MICRO)
                         .color(p::TEXT_FAINT),
                     );
                 });
@@ -2960,7 +3160,7 @@ impl App {
                         [150.0, 14.0],
                         egui::Label::new(
                             RichText::new("CONDITION")
-                                .size(8.5)
+                                .size(crate::theme::size::MICRO)
                                 .extra_letter_spacing(0.8)
                                 .color(p::TEXT_FAINT),
                         ),
@@ -2969,7 +3169,7 @@ impl App {
                         [66.0, 14.0],
                         egui::Label::new(
                             RichText::new("WARNING")
-                                .size(8.5)
+                                .size(crate::theme::size::MICRO)
                                 .extra_letter_spacing(0.8)
                                 .color(p::TEXT_FAINT),
                         ),
@@ -2978,7 +3178,7 @@ impl App {
                         [66.0, 14.0],
                         egui::Label::new(
                             RichText::new("CRITICAL")
-                                .size(8.5)
+                                .size(crate::theme::size::MICRO)
                                 .extra_letter_spacing(0.8)
                                 .color(p::TEXT_FAINT),
                         ),
@@ -2987,14 +3187,14 @@ impl App {
                         [52.0, 14.0],
                         egui::Label::new(
                             RichText::new("SUSTAIN")
-                                .size(8.5)
+                                .size(crate::theme::size::MICRO)
                                 .extra_letter_spacing(0.8)
                                 .color(p::TEXT_FAINT),
                         ),
                     );
                     ui.label(
                         RichText::new("CURRENT")
-                            .size(8.5)
+                            .size(crate::theme::size::MICRO)
                             .extra_letter_spacing(0.8)
                             .color(p::TEXT_FAINT),
                     );
@@ -3005,25 +3205,35 @@ impl App {
                     ui.horizontal(|ui| {
                         ui.add_sized(
                             [150.0, 16.0],
-                            egui::Label::new(RichText::new(name).size(10.5).color(p::TEXT)),
-                        );
-                        ui.add_sized(
-                            [66.0, 16.0],
                             egui::Label::new(
-                                RichText::new(warn).size(10.0).monospace().color(p::AMBER),
+                                RichText::new(name)
+                                    .size(crate::theme::size::SMALL)
+                                    .color(p::TEXT),
                             ),
                         );
                         ui.add_sized(
                             [66.0, 16.0],
                             egui::Label::new(
-                                RichText::new(crit).size(10.0).monospace().color(p::RED),
+                                RichText::new(warn)
+                                    .size(crate::theme::size::SMALL)
+                                    .monospace()
+                                    .color(p::AMBER),
+                            ),
+                        );
+                        ui.add_sized(
+                            [66.0, 16.0],
+                            egui::Label::new(
+                                RichText::new(crit)
+                                    .size(crate::theme::size::SMALL)
+                                    .monospace()
+                                    .color(p::RED),
                             ),
                         );
                         ui.add_sized(
                             [52.0, 16.0],
                             egui::Label::new(
                                 RichText::new(sustain)
-                                    .size(10.0)
+                                    .size(crate::theme::size::SMALL)
                                     .monospace()
                                     .color(p::TEXT_FAINT),
                             ),
@@ -3031,12 +3241,17 @@ impl App {
                         match current {
                             Some(v) => {
                                 ui.label(
-                                    RichText::new(v).size(10.0).monospace().color(p::TEXT_DIM),
+                                    RichText::new(v)
+                                        .size(crate::theme::size::SMALL)
+                                        .monospace()
+                                        .color(p::TEXT_DIM),
                                 );
                             }
                             None => {
                                 ui.label(
-                                    RichText::new("— no source").size(10.0).color(p::TEXT_FAINT),
+                                    RichText::new(format!("{} no source", icons::DASH))
+                                        .size(crate::theme::size::SMALL)
+                                        .color(p::TEXT_FAINT),
                                 )
                                 .on_hover_text(
                                     "This metric has no reading, so it can never raise an alert.",
@@ -3071,11 +3286,17 @@ impl App {
                                 ui.spacing_mut().item_spacing.y = 1.0;
                                 ui.horizontal(|ui| {
                                     ui.label(
-                                        RichText::new(&a.title).size(12.0).strong().color(color),
+                                        RichText::new(&a.title)
+                                            .font(crate::theme::bold(crate::theme::size::BODY))
+                                            .color(color),
                                     );
                                     widgets::badge(ui, label, color);
                                 });
-                                ui.label(RichText::new(&a.detail).size(10.0).color(p::TEXT_DIM));
+                                ui.label(
+                                    RichText::new(&a.detail)
+                                        .size(crate::theme::size::SMALL)
+                                        .color(p::TEXT_DIM),
+                                );
                             });
                             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                                 ui.label(
@@ -3083,7 +3304,7 @@ impl App {
                                         "value {:.1} · threshold {:.0}",
                                         a.value, a.threshold
                                     ))
-                                    .size(9.5)
+                                    .size(crate::theme::size::MICRO)
                                     .monospace()
                                     .color(p::TEXT_FAINT),
                                 );
@@ -3099,30 +3320,38 @@ impl App {
             widgets::section(ui, "Recent events", |ui| {
                 ui.label(
                     RichText::new(format!("{} recorded", state.recent.len()))
-                        .size(9.5)
+                        .size(crate::theme::size::MICRO)
                         .color(p::TEXT_FAINT),
                 );
             });
             ui.add_space(2.0);
             if state.recent.is_empty() {
                 ui.label(
-                    RichText::new("— no events yet this session")
-                        .size(10.0)
+                    RichText::new(format!("{} no events yet this session", icons::DASH))
+                        .size(crate::theme::size::SMALL)
                         .color(p::TEXT_FAINT),
                 );
             }
             for ev in state.recent.iter().take(20) {
                 let (icon, color) = match ev.change {
-                    AlertChange::Raised => ("▲", p::AMBER),
-                    AlertChange::Cleared => ("▼", p::GREEN),
+                    AlertChange::Raised => (icons::UP, p::AMBER),
+                    AlertChange::Cleared => (icons::DOWN, p::GREEN),
                 };
                 ui.horizontal(|ui| {
-                    ui.label(RichText::new(icon).size(9.5).color(color));
-                    ui.label(RichText::new(&ev.alert.title).size(10.0).color(p::TEXT_DIM));
+                    ui.label(
+                        RichText::new(icon)
+                            .size(crate::theme::size::MICRO)
+                            .color(color),
+                    );
+                    ui.label(
+                        RichText::new(&ev.alert.title)
+                            .size(crate::theme::size::SMALL)
+                            .color(p::TEXT_DIM),
+                    );
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         ui.label(
                             RichText::new(format::clock_hms(ev.alert.ts_unix_ms))
-                                .size(9.0)
+                                .size(crate::theme::size::MICRO)
                                 .monospace()
                                 .color(p::TEXT_FAINT),
                         );
@@ -3132,7 +3361,7 @@ impl App {
                             } else {
                                 "cleared"
                             })
-                            .size(9.0)
+                            .size(crate::theme::size::MICRO)
                             .color(color),
                         );
                     });

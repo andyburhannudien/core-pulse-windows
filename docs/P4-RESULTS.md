@@ -175,6 +175,37 @@ That class of bug is exactly why ADR-0008 forbids placeholder numbers.
 The debug binary was used for screenshots; release numbers above are from
 `cargo build --release`.
 
+## Findings from the review pass
+
+A second review of the P4 build (2026-11-05) found and fixed four real defects:
+
+| Finding | Severity | Evidence | Fix |
+|---|---|---|---|
+| A client that connected and sent nothing blocked the **only** pipe instance forever; every other client was refused | **High** | Reproduced: silent client held the pipe, `core-pulse-cli helper` failed with "helper is busy or not responding" for 12+ s | Server reads now poll `PeekNamedPipe` with a 2 s deadline instead of blocking in `ReadFile`. Recovery measured at ~2 s |
+| The bold font was inserted at index 0 of the `Proportional` family, making **every label bold** | Medium | Visible in screenshots: all body text was heavy | Bold moved to a dedicated named family; `theme::bold()` is the only way to opt in |
+| `bold_mono` referenced a font family (`Hack-Bold`) that does not exist, so emphasised numerals could fail to lay out | Medium | epaint ships only `Hack` regular | Registers `consolab.ttf` as a real bold monospace family with a safe fallback |
+| Nav glyphs mixed monochrome text characters with emoji-rendered `⚙` and `▶`, so two rail items appeared in purple/blue | Low but very visible | 3× zoom of the rail | Icons are now painted geometry: identical weight, colour and size; no font dependency |
+
+Also tightened in the same pass:
+
+- Five ad-hoc text sizes (9.0/9.5/10.0/10.5/11.0) collapsed into a named type
+  scale, so `TextEdit`, table cells and headings cannot drift apart.
+- `—` (unknown) and `…` (not read yet) now come from one constant each, so the
+  ADR-0008 distinction cannot be lost at a call site.
+- Hover on the navigation rail is dimmer than selection and has no accent bar,
+  so hover no longer reads as "selected".
+- Added tests: duplicate/missing tab icons, hint length, and single-character
+  icon constants.
+
+**Verified correct during the same review:**
+
+- CPU percentages match WMI independently: `wixnative` read 15.2% of system in
+  core-pulse and 91% of one core in `Win32_PerfFormattedData_PerfProc_Process`
+  (91 ÷ 6 = 15.2).
+- The process table column count matches the header count.
+- The helper still rejects oversized frames and invalid JSON and detects death
+  in 0 ms after the pipe changes.
+
 ## Not done in P4
 
 | Item | Reason |

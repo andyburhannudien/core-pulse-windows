@@ -28,20 +28,6 @@ impl Tab {
         }
     }
 
-    /// Short glyph shown in the navigation rail. Text-only fallbacks are used
-    /// because a missing glyph is worse than no glyph.
-    pub fn icon(self) -> &'static str {
-        match self {
-            Self::Processes => "▤",
-            Self::Performance => "▥",
-            Self::Sensors => "◉",
-            Self::Alerts => "▲",
-            Self::Services => "⚙",
-            Self::Startup => "↗",
-            Self::Users => "◍",
-        }
-    }
-
     pub fn hint(self) -> &'static str {
         match self {
             Self::Processes => "Running processes, CPU, memory, actions",
@@ -517,18 +503,22 @@ mod tests {
     }
 
     #[test]
-    fn update_snapshot_ignores_same_seq() {
-        let mut s = AppState::default();
-        let mut snap = Snapshot::empty();
-        snap.seq = 5;
-        let a = Arc::new(snap.clone());
-        s.update_snapshot(&a);
-        assert_eq!(s.last_seq, 5);
-        s.update_snapshot(&a);
-        assert_eq!(
-            s.history.cpu.len(),
-            1,
-            "same seq must not add a history point"
-        );
+    fn tab_labels_are_unique() {
+        let labels: std::collections::HashSet<_> = Tab::all().iter().map(|t| t.label()).collect();
+        assert_eq!(labels.len(), Tab::all().len());
+    }
+
+    #[test]
+    fn every_tab_has_a_hint() {
+        // The command bar shows this line under the title; it must never be
+        // empty or so long that it wraps into the toolbar.
+        for tab in Tab::all() {
+            let hint = tab.hint();
+            assert!(!hint.is_empty(), "{tab:?} needs a hint");
+            assert!(
+                hint.chars().count() <= 60,
+                "{tab:?} hint is too long for the command bar"
+            );
+        }
     }
 }

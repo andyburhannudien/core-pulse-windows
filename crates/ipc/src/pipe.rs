@@ -18,8 +18,7 @@
 //! klien sebelum menjawab (lihat `helper::security`).
 
 use crate::{
-    FrameError, FrameHeader, MAX_MESSAGE_BYTES, PROTO_VERSION, READ_TIMEOUT_MS, read_message,
-    write_message,
+    FrameError, FrameHeader, MAX_MESSAGE_BYTES, PROTO_VERSION, READ_TIMEOUT_MS, write_message,
 };
 use serde::{Deserialize, Serialize};
 use windows::Win32::Foundation::{CloseHandle, HANDLE, WAIT_OBJECT_0};
@@ -213,19 +212,97 @@ impl PipeServer {
         std::mem::ManuallyDrop::new(unsafe { std::fs::File::from_raw_handle(self.handle.0) })
     }
 
-    pub fn read_request(&self) -> Result<crate::Request, FrameError> {
+    /// Baca satu request dengan batas waktu.
+    ///
+    /// Sebelumnya method ini memakai `ReadFile` blocking pada handle sinkron,
+    /// sehingga klien yang connect lalu diam akan menahan helper **selamanya**
+    /// dan semua klien lain ditolak. Sekarang data ditunggu dengan
+    /// `PeekNamedPipe` sampai deadline; hanya setelah byte-nya tersedia kita
+    /// membaca, jadi panggilan ini tidak pernah menggantung.
+    pub fn read_request_timeout(&self, timeout_ms: u32) -> Result<crate::Request, FrameError> {
+        let deadline =
+            std::time::Instant::now() + std::time::Duration::from_millis(timeout_ms as u64);
+
+        let mut header_buf = [0u8; FrameHeader::SIZE];
+        self.wait_for_bytes(FrameHeader::SIZE, deadline)?;
+        self.read_exact_sync(&mut header_buf)?;
+
+        let header = FrameHeader::decode(&header_buf);
+        header.validate().map_err(FrameError::Invalid)?;
+
+        let mut payload = vec![0u8; header.length as usize];
+        if !payload.is_empty() {
+            self.wait_for_bytes(payload.len(), deadline)?;
+            self.read_exact_sync(&mut payload)?;
+        }
+        Ok(serde_json::from_slice(&payload)?)
+    }
+
+    /// Tunggu sampai paling sedikit `needed` byte bisa dibaca, atau deadline
+    /// habis. Polling 2 ms cukup murah untuk server yang hanya melayani satu
+    /// klien lokal, dan jauh lebih sederhana daripada I/O overlapped.
+    fn wait_for_bytes(
+        &self,
+        needed: usize,
+        deadline: std::time::Instant,
+    ) -> Result<(), FrameError> {
+        let mut available = 0u32;
+        loop {
+            // SAFETY: handle valid dan dimiliki self; out-param valid.
+            let ok = unsafe {
+                windows::Win32::System::Pipes::PeekNamedPipe(
+                    self.handle,
+                    None,
+                    0,
+                    None,
+                    Some(&mut available),
+                    None,
+                )
+            };
+            if ok.is_err() {
+                return Err(FrameError::Io(std::io::Error::last_os_error()));
+            }
+            if available as usize >= needed {
+                return Ok(());
+            }
+            let now = std::time::Instant::now();
+            if now >= deadline {
+                return Err(FrameError::Io(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "timeout menunggu data dari klien",
+                )));
+            }
+            std::thread::sleep(std::time::Duration::from_millis(2).min(deadline - now));
+        }
+    }
+
+    fn read_exact_sync(&self, buf: &mut [u8]) -> Result<(), FrameError> {
+        use std::io::Read;
         let mut file = self.as_file();
-        read_message(&mut *file)
+        file.read_exact(buf)?;
+        Ok(())
+    }
+
+    /// Baca satu request tanpa batas waktu eksplisit. Dipertahankan untuk test
+    /// dan pemakaian yang sudah tahu data pasti tersedia.
+    pub fn read_request(&self) -> Result<crate::Request, FrameError> {
+        self.read_request_timeout(SERVER_REQUEST_TIMEOUT_MS)
     }
 
     pub fn write_response(&self, resp: &crate::Response) -> Result<(), FrameError> {
         let mut file = self.as_file();
         write_message(&mut *file, resp)?;
-        // Tunggu klien membaca semua byte sebelum instance diputus.
-        // Tanpa ini, `DisconnectNamedPipe` membuang data yang belum dibaca dan
-        // klien melihat "No process is on the other end of the pipe" (233).
-        // `FlushFileBuffers` pada pipe memblokir sampai pembaca mengosongkan
-        // buffer — itu perilaku yang didokumentasikan.
+        // Tunggu klien membaca semua byte sebelum instance diputus. Tanpa ini,
+        // `DisconnectNamedPipe` membuang data yang belum dibaca dan klien
+        // melihat "No process is on the other end of the pipe" (233).
+        //
+        // Batasan yang diketahui: `FlushFileBuffers` pada pipe tidak punya
+        // parameter timeout. Klien lokal yang mengirim request lalu berhenti
+        // membaca bisa menahan helper selama helper menunggu drain.
+        // `read_request_timeout` di bawah menutup varian serangan yang sudah
+        // terbukti (klien connect lalu diam total); varian "kirim lalu tidak
+        // baca" masih terbuka dan dicatat di docs/THREAT-MODEL.md T5 sebagai
+        // residual risk sampai protokol punya ACK eksplisit.
         // SAFETY: handle valid dan dimiliki self.
         unsafe {
             let _ = windows::Win32::Storage::FileSystem::FlushFileBuffers(self.handle);
@@ -247,6 +324,11 @@ impl Drop for PipeServer {
 /// menjawab dalam hitungan milidetik; angka ini hanya pengaman agar sensor
 /// thread tidak pernah menggantung.
 pub const CLIENT_IO_TIMEOUT_MS: u32 = 1_500;
+
+/// Batas waktu server menunggu request berikutnya pada satu koneksi. Klien
+/// normal mengirim request dalam mikrodetik; nilai ini hanya mencegah satu
+/// koneksi diam menahan helper.
+pub const SERVER_REQUEST_TIMEOUT_MS: u32 = READ_TIMEOUT_MS;
 
 /// Batas waktu mencoba connect. Kalau helper tidak ada, `WaitNamedPipeW`
 /// langsung gagal; kalau ada tetapi sibuk, kita menyerah cepat.
