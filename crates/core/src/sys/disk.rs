@@ -9,14 +9,15 @@
 //! | IOCTL | Akses 0 | Butuh baca |
 //! |---|---|---|
 //! | `IOCTL_STORAGE_QUERY_PROPERTY` | **ya** | — |
+//! | `IOCTL_DISK_GET_DRIVE_GEOMETRY_EX` | **ya** | — |
 //! | `IOCTL_DISK_GET_LENGTH_INFO` | tidak | ya |
 //! | `IOCTL_STORAGE_READ_CAPACITY` | tidak | ya |
 //!
-//! Karena ukuran disk tidak bisa dibaca tanpa admin, ukuran diturunkan dari
-//! jumlah kapasitas volume pada disk tersebut (`IOCTL_VOLUME_GET_VOLUME_DISK_EXTENTS`
-//! pada `\\.\C:` berjalan tanpa hak baca). Kalau ada partisi yang tidak
-//! ter-mount, ukuran akan lebih kecil dari kapasitas fisik — dicatat sebagai
-//! keterbatasan, bukan disembunyikan.
+//! Ukuran disk dibaca lewat `IOCTL_DISK_GET_DRIVE_GEOMETRY_EX`, yang berjalan
+//! tanpa hak baca dan juga bekerja untuk disk tanpa volume ter-mount. Kalau
+//! IOCTL itu gagal, ukuran diturunkan dari jumlah kapasitas volume pada disk
+//! tersebut (`IOCTL_VOLUME_GET_VOLUME_DISK_EXTENTS` pada `\\.\C:` berjalan
+//! tanpa hak baca) dan ditandai sebagai estimasi.
 
 use crate::model::{BusType, Degradation, DegradeReason, DiskData, MediaType, VolumeData};
 use crate::sys::pdh::{Counter, Query, parse_physical_disk_index};
@@ -403,8 +404,11 @@ fn probe_identity(index: u32, size_hint: u64) -> DiskIdentity {
 
     let mut returned = 0u32;
 
-    // --- Ukuran akurat (butuh hak baca; hanya berhasil kalau elevated) ---
-    if let Some(exact) = read_exact_size(index) {
+    // --- Ukuran akurat (akses 0; bekerja juga tanpa volume ter-mount) ---
+    if let Some(exact) = read_geometry_size(index) {
+        identity.size_bytes = exact;
+        identity.size_is_estimate = false;
+    } else if let Some(exact) = read_exact_size(index) {
         identity.size_bytes = exact;
         identity.size_is_estimate = false;
     }
@@ -475,8 +479,64 @@ fn probe_identity(index: u32, size_hint: u64) -> DiskIdentity {
     identity
 }
 
-/// Ukuran persis disk, hanya berhasil kalau proses punya hak baca pada device
-/// (yaitu saat elevated). Tanpa hak itu, pemanggil memakai estimasi dari volume.
+/// Ukuran disk dari geometry. Berjalan dengan akses 0, jadi tidak butuh admin
+/// dan tetap bekerja untuk disk yang tidak punya volume ter-mount.
+fn read_geometry_size(index: u32) -> Option<u64> {
+    use windows::Win32::Foundation::CloseHandle;
+    use windows::Win32::Storage::FileSystem::{
+        CreateFileW, FILE_ATTRIBUTE_NORMAL, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
+    };
+    use windows::Win32::System::IO::DeviceIoControl;
+    use windows::Win32::System::Ioctl::{DISK_GEOMETRY_EX, IOCTL_DISK_GET_DRIVE_GEOMETRY_EX};
+    use windows::core::PCWSTR;
+
+    let path = format!(r"\\.\PhysicalDrive{index}");
+    let path_w: Vec<u16> = path.encode_utf16().chain(std::iter::once(0)).collect();
+
+    // SAFETY: path NUL-terminated; akses 0 cukup untuk query geometry.
+    let handle = unsafe {
+        CreateFileW(
+            PCWSTR(path_w.as_ptr()),
+            0,
+            FILE_SHARE_READ | FILE_SHARE_WRITE,
+            None,
+            OPEN_EXISTING,
+            FILE_ATTRIBUTE_NORMAL,
+            None,
+        )
+    }
+    .ok()?;
+
+    let mut out = vec![0u8; std::mem::size_of::<DISK_GEOMETRY_EX>()];
+    let mut returned = 0u32;
+    // SAFETY: output buffer sesuai ukuran struct dan ditulis kernel.
+    let ok = unsafe {
+        DeviceIoControl(
+            handle,
+            IOCTL_DISK_GET_DRIVE_GEOMETRY_EX,
+            None,
+            0,
+            Some(out.as_mut_ptr() as *mut _),
+            out.len() as u32,
+            Some(&mut returned),
+            None,
+        )
+    }
+    .is_ok();
+    // SAFETY: handle dibuka di atas dan tidak dipakai lagi.
+    unsafe {
+        let _ = CloseHandle(handle);
+    }
+    if !ok {
+        return None;
+    }
+
+    // SAFETY: buffer berisi DISK_GEOMETRY_EX yang ditulis kernel.
+    let geometry = unsafe { std::ptr::read_unaligned(out.as_ptr() as *const DISK_GEOMETRY_EX) };
+    (geometry.DiskSize > 0).then_some(geometry.DiskSize as u64)
+}
+
+/// Ukuran persis disk lewat jalur yang membutuhkan hak baca (fallback).
 fn read_exact_size(index: u32) -> Option<u64> {
     use windows::Win32::Foundation::{CloseHandle, HANDLE};
     use windows::Win32::Storage::FileSystem::{

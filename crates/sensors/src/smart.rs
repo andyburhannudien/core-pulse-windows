@@ -4,9 +4,11 @@
 //! unit test. Bagian yang di-port: NVMe health log (log page 0x02) dan ATA
 //! Smartmontools READ DATA (0xD0).
 //!
-//! Akses perangkat: `\\.\PhysicalDriveN` dengan `GENERIC_READ` butuh
-//! administrator. Tanpa itu `probe()` melaporkan `NeedsElevation`, dan UI
-//! menampilkan "butuh helper" — bukan `0 °C`.
+//! Akses perangkat: `\\.\PhysicalDriveN` dengan `GENERIC_READ | GENERIC_WRITE`
+//! butuh administrator. Write access bukan untuk menulis disk: `IOCTL_ATA_PASS_THROUGH`
+//! menolak handle read-only dengan `ERROR_ACCESS_DENIED`, bahkan untuk perintah
+//! baca seperti SMART READ DATA. Tanpa hak itu `probe()` melaporkan
+//! `NeedsElevation`, dan UI menampilkan "butuh helper" — bukan `0 °C`.
 //!
 //! Catatan penting soal ATA: register SMART memakai tanda tangan
 //! `cylinder low = 0x4F`, `cylinder high = 0xC2`. Salah satu salah dan drive
@@ -216,8 +218,10 @@ enum OpenError {
 }
 
 fn open_flags() -> u32 {
-    // GENERIC_READ dari winnt.h. Dibutuhkan untuk SMART; akses 0 tidak cukup.
-    0x8000_0000
+    // GENERIC_READ | GENERIC_WRITE dari winnt.h. `IOCTL_ATA_PASS_THROUGH`
+    // mensyaratkan handle read/write, meski perintahnya hanya membaca SMART.
+    // Akses 0 atau read-only menghasilkan ERROR_ACCESS_DENIED (5).
+    0x8000_0000 | 0x4000_0000
 }
 
 fn try_open_device(index: u32) -> Result<windows::Win32::Foundation::HANDLE, OpenError> {

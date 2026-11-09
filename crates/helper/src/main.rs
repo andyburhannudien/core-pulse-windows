@@ -402,7 +402,7 @@ mod service {
     use windows::Win32::System::Services::*;
     use windows::core::{PCWSTR, PWSTR};
 
-    const SERVICE_NAME: &str = "core-pulse-helper";
+    const SERVICE_NAME: &str = core_pulse_ipc::HELPER_SERVICE_NAME;
     const DISPLAY_NAME: &str = "core-pulse sensor helper";
 
     static STATUS_HANDLE: AtomicIsize = AtomicIsize::new(0);

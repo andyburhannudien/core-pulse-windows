@@ -46,6 +46,12 @@ Or the reverse: malware creates a pipe server and our helper connects to it.
   compares the server executable path with the expected helper path
   (`core-pulse-helper.exe`, overridable via `CORE_PULSE_HELPER_PATH`). A
   mismatch is reported as `HelperError::Untrusted` and the data is discarded.
+- When the helper runs as a `LocalSystem` service, a non-admin client cannot
+  open the process to read its image path. The client then asks SCM for the
+  service PID and configured binary path (`QueryServiceStatusEx` +
+  `QueryServiceConfigW`) and accepts the pipe only if the PID matches the pipe
+  server **and** the configured binary matches the expected helper path. A
+  non-matching PID or path is `HelperError::Untrusted`.
 - The helper validates the client by resolving the **console session user** via
   WTS (`WTSQuerySessionInformationW` + `LookupAccountNameW`) and comparing it
   with the client token's user SID, and requires token integrity `Medium` or
@@ -53,8 +59,16 @@ Or the reverse: malware creates a pipe server and our helper connects to it.
 - If validation fails, the helper closes the connection without replying, so no
   information leaks to the rejected client.
 
-**Residual risk:** low. The current client check is a path comparison rather
-than a signature check; a build-time hash pin is the P5 hardening step.
+**Residual risk:** low for pipe impersonation. The path comparison is not a
+signature check; a build-time hash pin is the P5 hardening step.
+
+**Residual risk (installer layout):** the per-user installer places
+`core-pulse-helper.exe` under `%LOCALAPPDATA%`, while the service runs it as
+`LocalSystem`. A local user who can write that directory can replace the binary
+and gain SYSTEM on the next service start. This is a pre-existing installer
+issue, not introduced by the SCM fallback. Until the service image is moved to
+an admin-only directory (or verified by signature/hash), do not install the
+service on a multi-user machine.
 
 ### T2 — The pipe as a privilege-escalation path
 

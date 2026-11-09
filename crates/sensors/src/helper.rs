@@ -16,7 +16,10 @@ use crate::{Availability, SensorReport};
 use core_pulse_core::model::{
     Area, DegradeReason, SensorAvailability, SensorReading, SensorStatus,
 };
-use core_pulse_ipc::{PIPE_NAME, PROTO_VERSION, Request, Response, pipe::PipeClient};
+use core_pulse_ipc::{
+    HELPER_SERVICE_NAME, PIPE_NAME, PROTO_VERSION, Request, Response,
+    pipe::{PipeClient, ServiceProcess},
+};
 use std::path::{Path, PathBuf};
 
 /// Informasi helper yang sedang terhubung.
@@ -155,23 +158,60 @@ pub fn expected_helper_path() -> PathBuf {
 
 /// THREAT-MODEL T1: pipe bisa saja dibuat proses lain. Cocokkan PID server
 /// dengan executable helper yang kita harapkan sebelum memakai datanya.
+///
+/// Proses helper berjalan sebagai `LocalSystem`, dan user biasa tidak boleh
+/// `OpenProcess` proses SYSTEM. Untuk kasus itu, identitas diverifikasi lewat
+/// SCM: PID pemilik pipe harus sama dengan PID service helper, dan binary yang
+/// dikonfigurasi service harus cocok dengan helper yang diharapkan.
 fn verify_server_path(pid: u32) -> Result<(), HelperError> {
-    let actual = core_pulse_ipc::pipe::process_image_path(pid).ok_or_else(|| {
-        HelperError::Untrusted(format!(
-            "pipe server executable path (PID {pid}) could not be read"
-        ))
-    })?;
     let expected = expected_helper_path();
+    let actual = core_pulse_ipc::pipe::process_image_path(pid);
+    let service = core_pulse_ipc::pipe::service_process(HELPER_SERVICE_NAME);
+    verify_server_identity(pid, actual.as_deref(), service.as_ref(), &expected)
+}
 
-    if same_path(&actual, &expected) {
-        return Ok(());
+/// Logika verifikasi tanpa I/O, supaya kombinasi "proses tidak terbaca +
+/// service cocok/tidak cocok" bisa diuji.
+fn verify_server_identity(
+    pid: u32,
+    actual: Option<&Path>,
+    service: Option<&ServiceProcess>,
+    expected: &Path,
+) -> Result<(), HelperError> {
+    if let Some(actual) = actual {
+        if same_path(actual, expected) {
+            return Ok(());
+        }
+        return Err(HelperError::Untrusted(format!(
+            "pipe is held by {} (expected {})",
+            actual.display(),
+            expected.display()
+        )));
     }
 
-    Err(HelperError::Untrusted(format!(
-        "pipe is held by {} (expected {})",
-        actual.display(),
-        expected.display()
-    )))
+    let Some(service) = service else {
+        return Err(HelperError::Untrusted(format!(
+            "pipe server executable path (PID {pid}) could not be read"
+        )));
+    };
+
+    if service.pid != pid {
+        return Err(HelperError::Untrusted(format!(
+            "pipe server executable path (PID {pid}) could not be read, and \
+             service {HELPER_SERVICE_NAME} runs as PID {}",
+            service.pid
+        )));
+    }
+
+    if !same_path(&service.image_path, expected) {
+        return Err(HelperError::Untrusted(format!(
+            "pipe is held by service {HELPER_SERVICE_NAME} at {} (expected {})",
+            service.image_path.display(),
+            expected.display()
+        )));
+    }
+
+    Ok(())
 }
 
 fn same_path(a: &Path, b: &Path) -> bool {
@@ -451,5 +491,50 @@ mod tests {
             )),
         );
         assert!(report.degraded.is_empty());
+    }
+
+    fn service(pid: u32, image_path: PathBuf) -> ServiceProcess {
+        ServiceProcess { pid, image_path }
+    }
+
+    #[test]
+    fn service_fallback_accepts_matching_pid_and_path() {
+        let exe = std::env::current_exe().expect("current_exe");
+        let svc = service(4242, exe.clone());
+        assert!(verify_server_identity(4242, None, Some(&svc), &exe).is_ok());
+    }
+
+    #[test]
+    fn service_fallback_rejects_pid_mismatch() {
+        let exe = std::env::current_exe().expect("current_exe");
+        let svc = service(1, exe.clone());
+        let error = verify_server_identity(4242, None, Some(&svc), &exe).unwrap_err();
+        assert!(matches!(error, HelperError::Untrusted(_)));
+    }
+
+    #[test]
+    fn service_fallback_rejects_path_mismatch() {
+        let expected = std::env::current_exe().expect("current_exe");
+        let svc = service(4242, expected.with_extension("not-the-helper"));
+        let error = verify_server_identity(4242, None, Some(&svc), &expected).unwrap_err();
+        assert!(matches!(error, HelperError::Untrusted(_)));
+    }
+
+    #[test]
+    fn readable_process_path_is_authoritative() {
+        let expected = std::env::current_exe().expect("current_exe");
+        let actual = expected.with_extension("not-the-helper");
+        let svc = service(4242, expected.clone());
+        assert!(
+            verify_server_identity(4242, Some(&actual), Some(&svc), &expected).is_err(),
+            "path proses yang terbaca tidak boleh dikalahkan metadata service"
+        );
+    }
+
+    #[test]
+    fn missing_process_and_service_is_untrusted() {
+        let expected = std::env::current_exe().expect("current_exe");
+        let error = verify_server_identity(4242, None, None, &expected).unwrap_err();
+        assert!(matches!(error, HelperError::Untrusted(_)));
     }
 }

@@ -21,6 +21,8 @@ pub mod smart;
 use core_pulse_core::model::{
     Area, Confidence, Degradation, DegradeReason, SensorReading, SensorSource, Snapshot,
 };
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 /// Status ketersediaan sebuah provider.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -317,19 +319,96 @@ impl SensorStore {
     }
 }
 
+/// Kontrol runtime untuk poller sensor. Dipakai UI untuk toggle bridge/helper
+/// tanpa mengakses `Sensors` langsung dari thread lain.
+#[derive(Clone)]
+pub struct SensorControl {
+    bridge_enabled: Arc<AtomicBool>,
+    helper_enabled: Arc<AtomicBool>,
+}
+
+impl SensorControl {
+    pub fn new(bridge_enabled: bool, helper_enabled: bool) -> Self {
+        Self {
+            bridge_enabled: Arc::new(AtomicBool::new(bridge_enabled)),
+            helper_enabled: Arc::new(AtomicBool::new(helper_enabled)),
+        }
+    }
+
+    pub fn set_bridge_enabled(&self, enabled: bool) {
+        self.bridge_enabled.store(enabled, Ordering::Release);
+    }
+
+    pub fn set_helper_enabled(&self, enabled: bool) {
+        self.helper_enabled.store(enabled, Ordering::Release);
+    }
+
+    pub fn bridge_enabled(&self) -> bool {
+        self.bridge_enabled.load(Ordering::Acquire)
+    }
+
+    pub fn helper_enabled(&self) -> bool {
+        self.helper_enabled.load(Ordering::Acquire)
+    }
+}
+
 /// Jalankan pembacaan sensor di thread sendiri.
 ///
 /// Interval 2 detik: sensor hardware sendiri jarang memperbarui lebih cepat,
 /// dan SMART butuh 5–40 ms per disk. Sampler 1 Hz tidak boleh menunggu itu.
+///
+/// `control`, bila ada, memungkinkan UI mengubah bridge/helper saat runtime.
+/// Perubahan bridge menyebabkan `Sensors` dibuat ulang karena daftar provider
+/// bersifat statis; ini jarang terjadi dan aman dilakukan di thread sensor.
 pub fn spawn_sensor_poller(
     store: std::sync::Arc<SensorStore>,
+    sensors: Sensors,
+    on_read: Option<Box<dyn Fn() + Send>>,
+) -> std::thread::JoinHandle<()> {
+    spawn_sensor_poller_with_control(store, sensors, None, on_read)
+}
+
+pub fn spawn_sensor_poller_with_control(
+    store: std::sync::Arc<SensorStore>,
     mut sensors: Sensors,
+    control: Option<SensorControl>,
     on_read: Option<Box<dyn Fn() + Send>>,
 ) -> std::thread::JoinHandle<()> {
     std::thread::Builder::new()
         .name("sensors".into())
         .spawn(move || {
+            // Jika ada control, control adalah sumber kebenaran untuk opsi runtime.
+            if let Some(ctrl) = &control {
+                let want_bridge = ctrl.bridge_enabled();
+                let want_helper = ctrl.helper_enabled();
+                sensors = Sensors::with_options(want_bridge, want_helper);
+            }
+
+            let mut current_bridge = control
+                .as_ref()
+                .map(SensorControl::bridge_enabled)
+                .unwrap_or_else(|| has_bridge_provider(&sensors));
+            let mut current_helper = sensors.helper_enabled();
+
             loop {
+                if let Some(ctrl) = &control {
+                    let want_bridge = ctrl.bridge_enabled();
+                    let want_helper = ctrl.helper_enabled();
+                    if want_bridge != current_bridge {
+                        sensors = Sensors::with_options(want_bridge, want_helper);
+                        current_bridge = want_bridge;
+                        current_helper = want_helper;
+                        tracing::info!(
+                            bridge = want_bridge,
+                            helper = want_helper,
+                            "sensor providers reconfigured"
+                        );
+                    } else if want_helper != current_helper {
+                        sensors.enable_helper(want_helper);
+                        current_helper = want_helper;
+                    }
+                }
+
                 sensors.probe_all(false);
                 let report = sensors.poll().clone();
                 store.store(report);
@@ -340,6 +419,20 @@ pub fn spawn_sensor_poller(
             }
         })
         .expect("gagal membuat thread sensor")
+}
+
+fn has_bridge_provider(sensors: &Sensors) -> bool {
+    sensors.statuses().any(|(id, _)| id == "lhm-bridge")
+}
+
+/// Convenience: buat control, bangun sensors darinya, dan spawn poller.
+pub fn spawn_sensor_poller_controlled(
+    store: std::sync::Arc<SensorStore>,
+    control: SensorControl,
+    on_read: Option<Box<dyn Fn() + Send>>,
+) -> std::thread::JoinHandle<()> {
+    let sensors = Sensors::with_options(control.bridge_enabled(), control.helper_enabled());
+    spawn_sensor_poller_with_control(store, sensors, Some(control), on_read)
 }
 
 /// Rentang fisik yang masuk akal untuk setiap jenis sensor.

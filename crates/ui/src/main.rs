@@ -11,6 +11,7 @@
 mod elevate;
 mod format;
 mod icons;
+mod prefs;
 mod state;
 mod theme;
 mod widgets;
@@ -20,8 +21,10 @@ use core_pulse_core::{Collector, Snapshot};
 use eframe::egui;
 use egui::{Align, Color32, CornerRadius, Layout, RichText, Stroke, StrokeKind};
 use egui_extras::{Column, TableBuilder};
-use state::{AppState, PendingAction, PendingKind, SortKey, Tab};
+use prefs::UiPrefs;
+use state::{AppState, PendingAction, PendingKind, ProcessDensity, SortKey, Tab};
 use std::sync::Arc;
+use std::sync::mpsc;
 use theme::palette as p;
 
 fn main() -> eframe::Result<()> {
@@ -126,8 +129,13 @@ struct App {
     state: AppState,
     store: Arc<core_pulse_core::sampler::SnapshotStore>,
     alerts: Arc<core_pulse_core::alerts::AlertStore>,
+    sensor_control: core_pulse_sensors::SensorControl,
     /// Set once the keyboard shortcut for the search box is pressed.
     focus_search: bool,
+    /// Last persisted prefs (for change detection).
+    saved_prefs: UiPrefs,
+    /// Receiver for background helper diagnosis result, if running.
+    helper_diag_rx: Option<mpsc::Receiver<state::HelperDiagnose>>,
 }
 
 impl App {
@@ -152,11 +160,12 @@ impl App {
         // up to 500 ms) also get their own thread, every two seconds.
         let sensor_store = Arc::new(core_pulse_sensors::SensorStore::new());
         let sensor_ctx = cc.egui_ctx.clone();
-        core_pulse_sensors::spawn_sensor_poller(
+        let saved_prefs = UiPrefs::load();
+        let bridge_enabled = Self::bridge_enabled_cli() || saved_prefs.bridge_enabled;
+        let sensor_control = core_pulse_sensors::SensorControl::new(bridge_enabled, true);
+        core_pulse_sensors::spawn_sensor_poller_controlled(
             Arc::clone(&sensor_store),
-            // The helper is tried automatically, but the UI never requests
-            // elevation itself. If it is absent the status is "needs helper".
-            core_pulse_sensors::Sensors::with_options(Self::bridge_enabled(), true),
+            sensor_control.clone(),
             Some(Box::new(move || sensor_ctx.request_repaint())),
         );
 
@@ -169,25 +178,154 @@ impl App {
             cc.egui_ctx.clone(),
         );
 
+        let density = if saved_prefs.comfort {
+            ProcessDensity::Comfort
+        } else {
+            ProcessDensity::Compact
+        };
+        let columns = state::ProcessColumns {
+            path: saved_prefs.col_path,
+            io: saved_prefs.col_io,
+            gpu: saved_prefs.col_gpu,
+            threads: saved_prefs.col_threads,
+            handles: saved_prefs.col_handles,
+            session: saved_prefs.col_session,
+        };
+
         Self {
             state: AppState {
                 tab: start_tab,
                 detail_pid: start_detail,
+                bridge_enabled,
+                show_system: saved_prefs.show_system,
+                show_signatures: saved_prefs.show_signatures,
+                sensor_hot_only: saved_prefs.sensor_hot_only,
+                process_density: density,
+                process_columns: columns,
                 ..Default::default()
             },
             store,
             alerts,
+            sensor_control,
             focus_search: false,
+            saved_prefs,
+            helper_diag_rx: None,
         }
     }
 
-    /// The third-party bridge is only active when the user asks for it via
-    /// `--bridge` or an env var. Off by default (SENSORS.md §2 Tier 3).
-    fn bridge_enabled() -> bool {
+    /// CLI/env bridge opt-in. The UI toggle and saved prefs are OR'd on top.
+    /// Off by default (SENSORS.md §2 Tier 3).
+    fn bridge_enabled_cli() -> bool {
         std::env::args().any(|a| a == "--bridge")
             || std::env::var("CORE_PULSE_LHM_BRIDGE")
                 .map(|v| v == "1")
                 .unwrap_or(false)
+    }
+
+    fn current_prefs(&self) -> UiPrefs {
+        let s = &self.state;
+        UiPrefs {
+            bridge_enabled: s.bridge_enabled,
+            show_system: s.show_system,
+            show_signatures: s.show_signatures,
+            sensor_hot_only: s.sensor_hot_only,
+            comfort: matches!(s.process_density, ProcessDensity::Comfort),
+            col_path: s.process_columns.path,
+            col_io: s.process_columns.io,
+            col_gpu: s.process_columns.gpu,
+            col_threads: s.process_columns.threads,
+            col_handles: s.process_columns.handles,
+            col_session: s.process_columns.session,
+        }
+    }
+
+    fn maybe_save_prefs(&mut self) {
+        let cur = self.current_prefs();
+        if cur != self.saved_prefs {
+            cur.save();
+            self.saved_prefs = cur;
+        }
+    }
+
+    fn poll_helper_diagnose(&mut self) {
+        let mut done: Option<state::HelperDiagnose> = None;
+        if let Some(rx) = &self.helper_diag_rx {
+            match rx.try_recv() {
+                Ok(diag) => done = Some(diag),
+                Err(mpsc::TryRecvError::Empty) => {}
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    self.helper_diag_rx = None;
+                    self.state.helper_diagnosing = false;
+                    self.state
+                        .set_helper_diagnose("Diagnosis thread exited without a result.", true);
+                }
+            }
+        }
+        if let Some(diag) = done {
+            self.helper_diag_rx = None;
+            self.state.set_helper_diagnose(diag.text, diag.is_error);
+            let _ = diag;
+        }
+    }
+
+    fn run_helper_diagnose(&mut self) {
+        if self.state.helper_diagnosing {
+            return;
+        }
+        let (tx, rx) = mpsc::channel();
+        self.helper_diag_rx = Some(rx);
+        self.state.helper_diagnosing = true;
+        std::thread::spawn(move || {
+            use core_pulse_sensors::helper;
+            let at_unix_ms = core_pulse_core::sampler::now_unix_ms();
+            let (text, is_error) = match helper::fetch_once() {
+                Ok(data) => {
+                    let mut out = format!(
+                        "expected helper: {}\nconnected: version {} (PID {}), elevated: {}\n\nProvider status inside the helper:",
+                        helper::expected_helper_path().display(),
+                        data.info.version,
+                        data.info.pid,
+                        data.info.elevated,
+                    );
+                    for status in &data.statuses {
+                        let text = match &status.availability {
+                            core_pulse_core::model::SensorAvailability::Available => {
+                                "available".to_string()
+                            }
+                            core_pulse_core::model::SensorAvailability::NeedsElevation => {
+                                "needs administrator".to_string()
+                            }
+                            core_pulse_core::model::SensorAvailability::NotAvailable { reason } => {
+                                format!("unavailable: {reason}")
+                            }
+                            core_pulse_core::model::SensorAvailability::Failed { error } => {
+                                format!("failed: {error}")
+                            }
+                        };
+                        out.push_str(&format!("\n  {:<14} {text}", status.provider));
+                    }
+                    out.push_str(&format!("\n\nReadings: {} sensor(s)", data.readings.len()));
+                    for r in &data.readings {
+                        out.push_str(&format!(
+                            "\n  {:<28} {:>7.1} {:?} {:?} {}",
+                            r.label, r.value, r.unit, r.source, r.id
+                        ));
+                    }
+                    if !data.info.elevated {
+                        out.push_str(
+                            "\n\nWARNING: helper is not elevated; SMART stays unavailable.",
+                        );
+                    }
+                    (out, false)
+                }
+                Err(e) => (format!("helper diagnosis failed: {e}"), true),
+            };
+            let _ = tx.send(state::HelperDiagnose {
+                text,
+                is_error,
+                at_unix_ms,
+            });
+        });
     }
 }
 
@@ -201,6 +339,7 @@ impl eframe::App for App {
         self.state.update_alerts(&alert_arc);
         self.store.set_signatures_wanted(self.state.show_signatures);
         self.state.expire_feedback();
+        self.poll_helper_diagnose();
 
         // Keyboard: Ctrl+F focuses search, Ctrl+1..7 switch tabs, Esc closes
         // overlays. A technical user expects these from a desktop instrument
@@ -235,6 +374,7 @@ impl eframe::App for App {
         if escape {
             self.state.detail_pid = None;
             self.state.pending = None;
+            self.state.show_degraded_details = false;
         }
         if focus_search {
             self.state.tab = Tab::Processes;
@@ -279,6 +419,8 @@ impl eframe::App for App {
             });
 
         self.confirmation_dialog(&ui.ctx().clone());
+        self.degraded_window(&ui.ctx().clone());
+        self.maybe_save_prefs();
     }
 }
 
@@ -533,6 +675,31 @@ impl App {
                                 &mut self.state.sensor_hot_only,
                                 RichText::new("Only above 45 °C").size(crate::theme::size::BODY),
                             );
+                            ui.separator();
+                            let mut bridge = self.state.bridge_enabled;
+                            if ui
+                                .checkbox(
+                                    &mut bridge,
+                                    RichText::new("Third-party bridge (LHM)")
+                                        .size(crate::theme::size::BODY),
+                                )
+                                .on_hover_text(
+                                    "Opt-in: read LibreHardwareMonitor JSON from 127.0.0.1:8085 only. \
+                                     Data is marked ThirdParty and is never estimated by core-pulse.",
+                                )
+                                .changed()
+                            {
+                                self.state.bridge_enabled = bridge;
+                                self.sensor_control.set_bridge_enabled(bridge);
+                                self.state.set_feedback(
+                                    if bridge {
+                                        "LHM bridge enabled (opt-in, localhost:8085)".to_string()
+                                    } else {
+                                        "LHM bridge disabled".to_string()
+                                    },
+                                    false,
+                                );
+                            }
                         }
                         _ => {}
                     }
@@ -589,6 +756,18 @@ impl App {
         {
             self.state.search.clear();
         }
+        {
+            let s = Arc::clone(&self.state.snapshot);
+            let total = s.processes.iter().filter(|p| p.pid != 0).count();
+            let shown = self.state.visible_rows().len();
+            ui.label(
+                RichText::new(format!("{shown} / {total}"))
+                    .size(crate::theme::size::SMALL)
+                    .monospace()
+                    .color(p::TEXT_DIM),
+            )
+            .on_hover_text("Processes shown / total (PID 0 hidden)");
+        }
         ui.separator();
         ui.checkbox(
             &mut self.state.show_system,
@@ -610,6 +789,58 @@ impl App {
         {
             self.state.detail_pid = self.state.selected;
         }
+        ui.separator();
+        ui.menu_button(
+            RichText::new("View").size(crate::theme::size::SMALL),
+            |ui| {
+                ui.label(
+                    RichText::new("Density")
+                        .size(crate::theme::size::MICRO)
+                        .color(p::TEXT_FAINT),
+                );
+                ui.radio_value(
+                    &mut self.state.process_density,
+                    ProcessDensity::Compact,
+                    "Compact",
+                );
+                ui.radio_value(
+                    &mut self.state.process_density,
+                    ProcessDensity::Comfort,
+                    "Comfort",
+                );
+                ui.separator();
+                ui.label(
+                    RichText::new("Quick filters")
+                        .size(crate::theme::size::MICRO)
+                        .color(p::TEXT_FAINT),
+                );
+                ui.checkbox(&mut self.state.filter_cpu_hot, "CPU ≥ 5%")
+                    .on_hover_text("Only processes using at least 5% CPU");
+                ui.checkbox(&mut self.state.filter_elevated, "Elevated only")
+                    .on_hover_text("Only processes running elevated");
+                ui.checkbox(&mut self.state.filter_unsigned, "Unsigned only")
+                    .on_hover_text("Only processes with unsigned/invalid Authenticode signature");
+                ui.separator();
+                ui.label(
+                    RichText::new("Columns")
+                        .size(crate::theme::size::MICRO)
+                        .color(p::TEXT_FAINT),
+                );
+                ui.checkbox(&mut self.state.process_columns.path, "Path");
+                ui.checkbox(&mut self.state.process_columns.io, "I/O");
+                ui.checkbox(&mut self.state.process_columns.gpu, "GPU");
+                ui.checkbox(&mut self.state.process_columns.threads, "Threads");
+                ui.checkbox(&mut self.state.process_columns.handles, "Handles");
+                ui.checkbox(&mut self.state.process_columns.session, "Session");
+                ui.label(
+                    RichText::new(
+                        "PID, name, CPU, memory always shown. Signature uses its own toggle.",
+                    )
+                    .size(crate::theme::size::MICRO)
+                    .color(p::TEXT_FAINT),
+                );
+            },
+        );
     }
 
     /// Bottom strip: whatever feedback is pending, then always-on core metrics.
@@ -664,7 +895,7 @@ impl App {
                     status_metric(ui, "NET", &format::rate(net), p::CYAN);
                     ui.separator();
 
-                    // Temperature: be honest when no source exists.
+                    // Temperature: be honest when no source exists. Click opens Sensors.
                     let temps: Vec<f32> = s
                         .sensors
                         .iter()
@@ -678,29 +909,46 @@ impl App {
                                 .extra_letter_spacing(0.8)
                                 .color(p::TEXT_FAINT),
                         );
-                        ui.label(
-                            RichText::new(icons::DASH)
-                                .size(crate::theme::size::BODY)
-                                .monospace()
-                                .color(p::TEXT_DIM),
-                        )
-                        .on_hover_text(
-                            "No temperature source is active.\n\
-                                 ACPI thermal zones are not exposed by this machine's firmware; \
-                                 disk temperatures need the elevated helper. Open the Sensors tab.",
-                        );
-                    } else {
-                        // `reduce`, not `fold(f32::MIN, ..)`: MIN is finite and
-                        // would print a garbage temperature for an empty list.
-                        if let Some(max) = temps.iter().copied().reduce(f32::max) {
-                            let color = if max >= 70.0 {
-                                p::RED
-                            } else if max >= 55.0 {
-                                p::AMBER
-                            } else {
-                                p::GREEN
-                            };
-                            status_metric(ui, "TEMP", &format!("{max:.0} °C"), color);
+                        let resp = ui
+                            .add(
+                                egui::Label::new(
+                                    RichText::new(icons::DASH)
+                                        .size(crate::theme::size::BODY)
+                                        .monospace()
+                                        .color(p::TEXT_DIM),
+                                )
+                                .sense(egui::Sense::click()),
+                            )
+                            .on_hover_text(
+                                "No temperature source is active. Click for details.\n\
+                                 Common causes: firmware exposes no ACPI CPU thermal zone; \
+                                 disk SMART needs the elevated helper; GPU vendor driver unavailable; \
+                                 third-party bridge is off.",
+                            );
+                        if resp.clicked() {
+                            self.state.tab = Tab::Sensors;
+                        }
+                    } else if let Some(max) = temps.iter().copied().reduce(f32::max) {
+                        let color = if max >= 70.0 {
+                            p::RED
+                        } else if max >= 55.0 {
+                            p::AMBER
+                        } else {
+                            p::GREEN
+                        };
+                        let resp = ui
+                            .add(
+                                egui::Label::new(
+                                    RichText::new(format!("TEMP {max:.0} °C"))
+                                        .size(crate::theme::size::SMALL)
+                                        .monospace()
+                                        .color(color),
+                                )
+                                .sense(egui::Sense::click()),
+                            )
+                            .on_hover_text("Hottest active temperature sensor. Click to open Sensors.");
+                        if resp.clicked() {
+                            self.state.tab = Tab::Sensors;
                         }
                     }
 
@@ -721,18 +969,22 @@ impl App {
                         if !s.degraded.is_empty() {
                             ui.separator();
                             let n = s.degraded.len();
-                            ui.label(
-                                RichText::new(format!("{n} degraded source(s)"))
-                                    .size(crate::theme::size::MICRO)
-                                    .color(p::AMBER),
-                            )
-                            .on_hover_text(
-                                s.degraded
-                                    .iter()
-                                    .map(|d| format!("{:?}/{:?}: {}", d.area, d.reason, d.detail))
-                                    .collect::<Vec<_>>()
-                                    .join("\n"),
-                            );
+                            let resp = ui
+                                .add(
+                                    egui::Label::new(
+                                        RichText::new(format!("! {n} degraded source(s)"))
+                                            .size(crate::theme::size::MICRO)
+                                            .color(p::AMBER),
+                                    )
+                                    .sense(egui::Sense::click()),
+                                )
+                                .on_hover_text("Click for details. Secondary click opens Sensors.");
+                            if resp.clicked() {
+                                self.state.show_degraded_details = true;
+                            }
+                            if resp.secondary_clicked() {
+                                self.state.tab = Tab::Sensors;
+                            }
                         }
                     });
                 });
@@ -835,368 +1087,463 @@ impl App {
         };
 
         let show_sig = self.state.show_signatures;
+        let cols = self.state.process_columns;
+        let comfort = matches!(self.state.process_density, ProcessDensity::Comfort);
+        let row_h = if comfort { 26.0 } else { 21.0 };
+        let header_h = if comfort { 28.0 } else { 24.0 };
         let avail = ui.available_height();
 
+        #[derive(Clone, Copy)]
+        enum ProcCol {
+            Pid,
+            Name,
+            Path,
+            Cpu,
+            Memory,
+            Io,
+            Gpu,
+            Threads,
+            Handles,
+            Session,
+            Signature,
+        }
+
+        let mut active: Vec<ProcCol> = vec![ProcCol::Pid, ProcCol::Name];
+        if cols.path {
+            active.push(ProcCol::Path);
+        }
+        active.push(ProcCol::Cpu);
+        active.push(ProcCol::Memory);
+        if cols.io {
+            active.push(ProcCol::Io);
+        }
+        if cols.gpu {
+            active.push(ProcCol::Gpu);
+        }
+        if cols.threads {
+            active.push(ProcCol::Threads);
+        }
+        if cols.handles {
+            active.push(ProcCol::Handles);
+        }
+        if cols.session {
+            active.push(ProcCol::Session);
+        }
+        if show_sig {
+            active.push(ProcCol::Signature);
+        }
+
         widgets::framed(ui, |ui| {
-            TableBuilder::new(ui)
+            let mut table = TableBuilder::new(ui)
                 .id_salt("process_table")
                 .striped(true)
                 .resizable(false)
-                .cell_layout(Layout::left_to_right(Align::Center))
-                .column(Column::auto().at_least(56.0).at_most(56.0))
-                .column(Column::exact(190.0).clip(true))
-                .column(Column::remainder().at_least(120.0).clip(true))
-                .column(Column::exact(76.0))
-                .column(Column::exact(92.0))
-                .column(Column::exact(84.0))
-                .column(Column::exact(76.0))
-                .column(Column::exact(52.0))
-                .column(Column::exact(44.0))
-                .column(Column::exact(46.0))
-                .column(Column::exact(56.0))
+                .cell_layout(Layout::left_to_right(Align::Center));
+            for col in &active {
+                table = match col {
+                    ProcCol::Pid => table.column(Column::auto().at_least(56.0).at_most(56.0)),
+                    ProcCol::Name => table.column(Column::exact(190.0).clip(true)),
+                    ProcCol::Path => table.column(Column::remainder().at_least(120.0).clip(true)),
+                    ProcCol::Cpu => table.column(Column::exact(76.0)),
+                    ProcCol::Memory => table.column(Column::exact(92.0)),
+                    ProcCol::Io => table.column(Column::exact(84.0)),
+                    ProcCol::Gpu => table.column(Column::exact(76.0)),
+                    ProcCol::Threads => table.column(Column::exact(52.0)),
+                    ProcCol::Handles => table.column(Column::exact(44.0)),
+                    ProcCol::Session => table.column(Column::exact(46.0)),
+                    ProcCol::Signature => table.column(Column::exact(56.0)),
+                };
+            }
+            table
                 .min_scrolled_height(0.0)
                 .max_scroll_height(avail - 2.0)
-                .header(24.0, |mut header| {
-                    header.col(|ui| {
-                        if ui
-                            .add(
-                                egui::Button::new(
-                                    RichText::new(format!("PID{}", arrow(SortKey::Pid)))
-                                        .size(crate::theme::size::MICRO)
-                                        .color(p::TEXT_FAINT),
-                                )
-                                .frame(false),
-                            )
-                            .clicked()
-                        {
-                            clicked = Some(SortKey::Pid);
+                .header(header_h, |mut header| {
+                    for col in &active {
+                        match col {
+                            ProcCol::Pid => {
+                                header.col(|ui| {
+                                    if ui
+                                        .add(
+                                            egui::Button::new(
+                                                RichText::new(format!("PID{}", arrow(SortKey::Pid)))
+                                                    .size(crate::theme::size::MICRO)
+                                                    .color(p::TEXT_FAINT),
+                                            )
+                                            .frame(false),
+                                        )
+                                        .clicked()
+                                    {
+                                        clicked = Some(SortKey::Pid);
+                                    }
+                                });
+                            }
+                            ProcCol::Name => {
+                                header.col(|ui| {
+                                    if ui
+                                        .add(
+                                            egui::Button::new(
+                                                RichText::new(format!("NAME{}", arrow(SortKey::Name)))
+                                                    .size(crate::theme::size::MICRO)
+                                                    .color(p::TEXT_FAINT),
+                                            )
+                                            .frame(false),
+                                        )
+                                        .clicked()
+                                    {
+                                        clicked = Some(SortKey::Name);
+                                    }
+                                });
+                            }
+                            ProcCol::Path => {
+                                header.col(|ui| {
+                                    ui.label(
+                                        RichText::new("EXECUTABLE PATH")
+                                            .size(crate::theme::size::MICRO)
+                                            .color(p::TEXT_FAINT),
+                                    );
+                                });
+                            }
+                            ProcCol::Cpu => {
+                                header.col(|ui| {
+                                    if ui
+                                        .add(
+                                            egui::Button::new(
+                                                RichText::new(format!("CPU{}", arrow(SortKey::Cpu)))
+                                                    .size(crate::theme::size::MICRO)
+                                                    .color(p::TEXT_FAINT),
+                                            )
+                                            .frame(false),
+                                        )
+                                        .clicked()
+                                    {
+                                        clicked = Some(SortKey::Cpu);
+                                    }
+                                });
+                            }
+                            ProcCol::Memory => {
+                                header.col(|ui| {
+                                    if ui
+                                        .add(
+                                            egui::Button::new(
+                                                RichText::new(format!("MEMORY{}", arrow(SortKey::Memory)))
+                                                    .size(crate::theme::size::MICRO)
+                                                    .color(p::TEXT_FAINT),
+                                            )
+                                            .frame(false),
+                                        )
+                                        .clicked()
+                                    {
+                                        clicked = Some(SortKey::Memory);
+                                    }
+                                });
+                            }
+                            ProcCol::Io => {
+                                header.col(|ui| {
+                                    ui.label(
+                                        RichText::new("I/O TOTAL")
+                                            .size(crate::theme::size::MICRO)
+                                            .color(p::TEXT_FAINT),
+                                    );
+                                });
+                            }
+                            ProcCol::Gpu => {
+                                header.col(|ui| {
+                                    ui.label(
+                                        RichText::new("GPU")
+                                            .size(crate::theme::size::MICRO)
+                                            .color(p::TEXT_FAINT),
+                                    );
+                                });
+                            }
+                            ProcCol::Threads => {
+                                header.col(|ui| {
+                                    ui.label(
+                                        RichText::new("THR")
+                                            .size(crate::theme::size::MICRO)
+                                            .color(p::TEXT_FAINT),
+                                    );
+                                });
+                            }
+                            ProcCol::Handles => {
+                                header.col(|ui| {
+                                    ui.label(
+                                        RichText::new("HND")
+                                            .size(crate::theme::size::MICRO)
+                                            .color(p::TEXT_FAINT),
+                                    );
+                                });
+                            }
+                            ProcCol::Session => {
+                                header.col(|ui| {
+                                    ui.label(
+                                        RichText::new("SESSION")
+                                            .size(crate::theme::size::MICRO)
+                                            .color(p::TEXT_FAINT),
+                                    );
+                                });
+                            }
+                            ProcCol::Signature => {
+                                header.col(|ui| {
+                                    ui.label(
+                                        RichText::new("SIGNATURE")
+                                            .size(crate::theme::size::MICRO)
+                                            .color(p::TEXT_FAINT),
+                                    );
+                                });
+                            }
                         }
-                    });
-                    header.col(|ui| {
-                        if ui
-                            .add(
-                                egui::Button::new(
-                                    RichText::new(format!("NAME{}", arrow(SortKey::Name)))
-                                        .size(crate::theme::size::MICRO)
-                                        .color(p::TEXT_FAINT),
-                                )
-                                .frame(false),
-                            )
-                            .clicked()
-                        {
-                            clicked = Some(SortKey::Name);
-                        }
-                    });
-                    header.col(|ui| {
-                        ui.label(
-                            RichText::new("EXECUTABLE PATH")
-                                .size(crate::theme::size::MICRO)
-                                .color(p::TEXT_FAINT),
-                        );
-                    });
-                    header.col(|ui| {
-                        if ui
-                            .add(
-                                egui::Button::new(
-                                    RichText::new(format!("CPU{}", arrow(SortKey::Cpu)))
-                                        .size(crate::theme::size::MICRO)
-                                        .color(p::TEXT_FAINT),
-                                )
-                                .frame(false),
-                            )
-                            .clicked()
-                        {
-                            clicked = Some(SortKey::Cpu);
-                        }
-                    });
-                    header.col(|ui| {
-                        if ui
-                            .add(
-                                egui::Button::new(
-                                    RichText::new(format!("MEMORY{}", arrow(SortKey::Memory)))
-                                        .size(crate::theme::size::MICRO)
-                                        .color(p::TEXT_FAINT),
-                                )
-                                .frame(false),
-                            )
-                            .clicked()
-                        {
-                            clicked = Some(SortKey::Memory);
-                        }
-                    });
-                    header.col(|ui| {
-                        ui.label(
-                            RichText::new("I/O TOTAL")
-                                .size(crate::theme::size::MICRO)
-                                .color(p::TEXT_FAINT),
-                        );
-                    });
-                    header.col(|ui| {
-                        ui.label(
-                            RichText::new("GPU")
-                                .size(crate::theme::size::MICRO)
-                                .color(p::TEXT_FAINT),
-                        );
-                    });
-                    header.col(|ui| {
-                        ui.label(
-                            RichText::new("THR")
-                                .size(crate::theme::size::MICRO)
-                                .color(p::TEXT_FAINT),
-                        );
-                    });
-                    header.col(|ui| {
-                        ui.label(
-                            RichText::new("HND")
-                                .size(crate::theme::size::MICRO)
-                                .color(p::TEXT_FAINT),
-                        );
-                    });
-                    header.col(|ui| {
-                        ui.label(
-                            RichText::new("SESSION")
-                                .size(crate::theme::size::MICRO)
-                                .color(p::TEXT_FAINT),
-                        );
-                    });
-                    if show_sig {
-                        header.col(|ui| {
-                            ui.label(
-                                RichText::new("SIGNATURE")
-                                    .size(crate::theme::size::MICRO)
-                                    .color(p::TEXT_FAINT),
-                            );
-                        });
                     }
                 })
                 .body(|body| {
-                    body.rows(21.0, rows.len(), |mut row| {
+                    body.rows(row_h, rows.len(), |mut row| {
                         let i = row.index();
                         let proc = rows[i];
                         row.set_selected(selected == Some(proc.pid));
 
-                        row.col(|ui| {
-                            ui.label(
-                                RichText::new(proc.pid.to_string())
-                                    .size(crate::theme::size::SMALL)
-                                    .monospace()
-                                    .color(p::TEXT_FAINT),
-                            );
-                        });
-                        row.col(|ui| {
-                            let color = if proc.elevated == Some(true) {
-                                p::AMBER
-                            } else {
-                                ui.visuals().text_color()
-                            };
-                            ui.horizontal(|ui| {
-                                ui.spacing_mut().item_spacing.x = 6.0;
-                                // A leading state dot: green running, amber
-                                // suspended, red not responding, dim zombie.
-                                let dot_color = match proc.status {
-                                    core_pulse_core::model::ProcessStatus::Running => p::GREEN,
-                                    core_pulse_core::model::ProcessStatus::Suspended => p::AMBER,
-                                    core_pulse_core::model::ProcessStatus::NotResponding => p::RED,
-                                    core_pulse_core::model::ProcessStatus::Zombie => p::TEXT_FAINT,
-                                };
-                                let dot = widgets::dot(ui, dot_color, false);
-                                if proc.status != core_pulse_core::model::ProcessStatus::Running {
-                                    dot.on_hover_text(format!("{:?}", proc.status));
-                                }
-                                let label = ui.label(
-                                    RichText::new(format::truncate(&proc.name, 58))
-                                        .size(crate::theme::size::BODY)
-                                        .color(color),
-                                );
-                                label.context_menu(|ui| {
-                                    process_context_menu(
-                                        ui,
-                                        proc,
-                                        &mut requested,
-                                        &mut open_detail,
-                                    );
-                                });
-                            });
-                        });
-                        row.col(|ui| {
-                            // The path is the single most useful column for
-                            // telling identically named processes apart.
-                            match &proc.exe_path {
-                                Some(path) => {
-                                    let text = path.display().to_string();
-                                    ui.add(
-                                        egui::Label::new(
-                                            RichText::new(format::middle_truncate(&text, 72))
-                                                .size(crate::theme::size::MICRO)
+                        for col in &active {
+                            match col {
+                                ProcCol::Pid => {
+                                    row.col(|ui| {
+                                        ui.label(
+                                            RichText::new(proc.pid.to_string())
+                                                .size(crate::theme::size::SMALL)
                                                 .monospace()
                                                 .color(p::TEXT_FAINT),
-                                        )
-                                        .truncate(),
-                                    )
-                                    .on_hover_text(&text);
+                                        );
+                                    });
                                 }
-                                None => {
-                                    ui.label(
-                                        RichText::new(icons::DASH)
-                                            .size(crate::theme::size::MICRO)
-                                            .color(p::TEXT_FAINT),
-                                    )
-                                    .on_hover_text(
-                                        "Path not readable. Reading the image path of another \
-                                             user's process needs administrator rights.",
-                                    );
+                                ProcCol::Name => {
+                                    row.col(|ui| {
+                                        let color = if proc.elevated == Some(true) {
+                                            p::AMBER
+                                        } else {
+                                            ui.visuals().text_color()
+                                        };
+                                        ui.horizontal(|ui| {
+                                            ui.spacing_mut().item_spacing.x = 6.0;
+                                            let dot_color = match proc.status {
+                                                core_pulse_core::model::ProcessStatus::Running => p::GREEN,
+                                                core_pulse_core::model::ProcessStatus::Suspended => p::AMBER,
+                                                core_pulse_core::model::ProcessStatus::NotResponding => p::RED,
+                                                core_pulse_core::model::ProcessStatus::Zombie => p::TEXT_FAINT,
+                                            };
+                                            let dot = widgets::dot(ui, dot_color, false);
+                                            if proc.status != core_pulse_core::model::ProcessStatus::Running {
+                                                dot.on_hover_text(format!("{:?}", proc.status));
+                                            }
+                                            let label = ui.label(
+                                                RichText::new(format::truncate(&proc.name, 58))
+                                                    .size(crate::theme::size::BODY)
+                                                    .color(color),
+                                            );
+                                            label.context_menu(|ui| {
+                                                process_context_menu(
+                                                    ui,
+                                                    proc,
+                                                    &mut requested,
+                                                    &mut open_detail,
+                                                );
+                                            });
+                                        });
+                                    });
                                 }
-                            }
-                        });
-                        row.col(|ui| {
-                            // The percentage and its mini-bar share one cell.
-                            // A fixed-width number plus a short bar reads as a
-                            // single datum rather than two competing ones.
-                            let pct = proc.cpu_percent;
-                            ui.horizontal(|ui| {
-                                ui.spacing_mut().item_spacing.x = 5.0;
-                                let color = if pct >= 50.0 {
-                                    p::RED
-                                } else if pct >= 10.0 {
-                                    p::AMBER
-                                } else {
-                                    p::TEXT_DIM
-                                };
-                                ui.add_sized(
-                                    [34.0, 14.0],
-                                    egui::Label::new(
-                                        RichText::new(format!("{pct:.1}"))
+                                ProcCol::Path => {
+                                    row.col(|ui| match &proc.exe_path {
+                                        Some(path) => {
+                                            let text = path.display().to_string();
+                                            ui.add(
+                                                egui::Label::new(
+                                                    RichText::new(format::middle_truncate(&text, 72))
+                                                        .size(crate::theme::size::MICRO)
+                                                        .monospace()
+                                                        .color(p::TEXT_FAINT),
+                                                )
+                                                .truncate(),
+                                            )
+                                            .on_hover_text(&text);
+                                        }
+                                        None => {
+                                            ui.label(
+                                                RichText::new(icons::DASH)
+                                                    .size(crate::theme::size::MICRO)
+                                                    .color(p::TEXT_FAINT),
+                                            )
+                                            .on_hover_text(
+                                                "Path not readable. Reading the image path of another \
+                                                 user's process needs administrator rights.",
+                                            );
+                                        }
+                                    });
+                                }
+                                ProcCol::Cpu => {
+                                    row.col(|ui| {
+                                        let pct = proc.cpu_percent;
+                                        ui.horizontal(|ui| {
+                                            ui.spacing_mut().item_spacing.x = 5.0;
+                                            let color = if pct >= 50.0 {
+                                                p::RED
+                                            } else if pct >= 10.0 {
+                                                p::AMBER
+                                            } else {
+                                                p::TEXT_DIM
+                                            };
+                                            ui.add_sized(
+                                                [34.0, 14.0],
+                                                egui::Label::new(
+                                                    RichText::new(format!("{pct:.1}"))
+                                                        .size(crate::theme::size::SMALL)
+                                                        .monospace()
+                                                        .color(color),
+                                                ),
+                                            );
+                                            let (rect, _) = ui.allocate_exact_size(
+                                                egui::vec2(26.0, 5.0),
+                                                egui::Sense::hover(),
+                                            );
+                                            let painter = ui.painter_at(rect);
+                                            painter.rect_filled(rect, CornerRadius::same(2), p::BG);
+                                            painter.rect_filled(
+                                                egui::Rect::from_min_size(
+                                                    rect.min,
+                                                    egui::vec2(
+                                                        rect.width() * (pct / 100.0).clamp(0.0, 1.0),
+                                                        rect.height(),
+                                                    ),
+                                                ),
+                                                CornerRadius::same(2),
+                                                color,
+                                            );
+                                        });
+                                    });
+                                }
+                                ProcCol::Memory => {
+                                    row.col(|ui| {
+                                        let (digits, unit) =
+                                            format::bytes_split(proc.mem_private_bytes);
+                                        ui.horizontal(|ui| {
+                                            ui.spacing_mut().item_spacing.x = 3.0;
+                                            ui.label(
+                                                RichText::new(digits)
+                                                    .size(crate::theme::size::SMALL)
+                                                    .monospace()
+                                                    .color(p::TEXT_DIM),
+                                            );
+                                            ui.label(
+                                                RichText::new(unit)
+                                                    .size(crate::theme::size::MICRO)
+                                                    .color(p::TEXT_FAINT),
+                                            );
+                                        });
+                                    });
+                                }
+                                ProcCol::Io => {
+                                    row.col(|ui| {
+                                        let io = proc.io_read_bytes + proc.io_write_bytes;
+                                        ui.label(
+                                            RichText::new(if io == 0 {
+                                                "—".to_string()
+                                            } else {
+                                                format::bytes(io)
+                                            })
                                             .size(crate::theme::size::SMALL)
                                             .monospace()
-                                            .color(color),
-                                    ),
-                                );
-                                let (rect, _) = ui.allocate_exact_size(
-                                    egui::vec2(26.0, 5.0),
-                                    egui::Sense::hover(),
-                                );
-                                let painter = ui.painter_at(rect);
-                                painter.rect_filled(rect, CornerRadius::same(2), p::BG);
-                                painter.rect_filled(
-                                    egui::Rect::from_min_size(
-                                        rect.min,
-                                        egui::vec2(
-                                            rect.width() * (pct / 100.0).clamp(0.0, 1.0),
-                                            rect.height(),
-                                        ),
-                                    ),
-                                    CornerRadius::same(2),
-                                    color,
-                                );
-                            });
-                        });
-                        row.col(|ui| {
-                            // Split into digits + unit so the numbers line up
-                            // across rows instead of ragged strings.
-                            let (digits, unit) = format::bytes_split(proc.mem_private_bytes);
-                            ui.horizontal(|ui| {
-                                ui.spacing_mut().item_spacing.x = 3.0;
-                                ui.label(
-                                    RichText::new(digits)
-                                        .size(crate::theme::size::SMALL)
-                                        .monospace()
-                                        .color(p::TEXT_DIM),
-                                );
-                                ui.label(
-                                    RichText::new(unit)
-                                        .size(crate::theme::size::MICRO)
-                                        .color(p::TEXT_FAINT),
-                                );
-                            });
-                        });
-                        row.col(|ui| {
-                            let io = proc.io_read_bytes + proc.io_write_bytes;
-                            ui.label(
-                                RichText::new(if io == 0 {
-                                    "—".to_string()
-                                } else {
-                                    format::bytes(io)
-                                })
-                                .size(crate::theme::size::SMALL)
-                                .monospace()
-                                .color(p::TEXT_FAINT),
-                            )
-                            .on_hover_text(format!(
-                                "read {}\nwritten {}",
-                                format::bytes(proc.io_read_bytes),
-                                format::bytes(proc.io_write_bytes)
-                            ));
-                        });
-                        row.col(|ui| match proc.gpu_percent {
-                            Some(g) => {
-                                ui.label(
-                                    RichText::new(format!("{g:.1}%"))
-                                        .size(crate::theme::size::SMALL)
-                                        .monospace()
-                                        .color(p::CYAN),
-                                );
-                            }
-                            None => {
-                                ui.label(
-                                    RichText::new(icons::DASH)
-                                        .size(crate::theme::size::SMALL)
-                                        .color(p::TEXT_FAINT),
-                                );
-                            }
-                        });
-                        row.col(|ui| {
-                            ui.label(
-                                RichText::new(proc.threads.to_string())
-                                    .size(crate::theme::size::SMALL)
-                                    .monospace()
-                                    .color(p::TEXT_FAINT),
-                            );
-                        });
-                        row.col(|ui| {
-                            ui.label(
-                                RichText::new(proc.handles.to_string())
-                                    .size(crate::theme::size::SMALL)
-                                    .monospace()
-                                    .color(p::TEXT_FAINT),
-                            );
-                        });
-                        row.col(|ui| {
-                            ui.label(
-                                RichText::new(proc.session_id.to_string())
-                                    .size(crate::theme::size::SMALL)
-                                    .monospace()
-                                    .color(p::TEXT_FAINT),
-                            );
-                        });
-                        if show_sig {
-                            row.col(|ui| match &proc.signature {
-                                Some(sig) => {
-                                    let (icon, color, tip) = match sig.status {
-                                        core_pulse_core::model::SigStatus::Valid => (
-                                            icons::CHECK,
-                                            p::GREEN,
-                                            sig.publisher
-                                                .clone()
-                                                .unwrap_or_else(|| "signed".into()),
-                                        ),
-                                        core_pulse_core::model::SigStatus::Invalid => {
-                                            (icons::CROSS, p::RED, "signature invalid".into())
-                                        }
-                                        core_pulse_core::model::SigStatus::Unsigned => {
-                                            (icons::DASH, p::TEXT_FAINT, "not signed".into())
-                                        }
-                                        core_pulse_core::model::SigStatus::Unknown => {
-                                            ("?", p::TEXT_FAINT, "not yet verified".into())
-                                        }
-                                    };
-                                    ui.label(RichText::new(icon).color(color))
-                                        .on_hover_text(tip);
+                                            .color(p::TEXT_FAINT),
+                                        )
+                                        .on_hover_text(format!(
+                                            "read {}\nwritten {}",
+                                            format::bytes(proc.io_read_bytes),
+                                            format::bytes(proc.io_write_bytes)
+                                        ));
+                                    });
                                 }
-                                None => {
-                                    ui.label(RichText::new(icons::PENDING).color(p::TEXT_FAINT))
-                                        .on_hover_text("waiting for verification");
+                                ProcCol::Gpu => {
+                                    row.col(|ui| match proc.gpu_percent {
+                                        Some(g) => {
+                                            ui.label(
+                                                RichText::new(format!("{g:.1}%"))
+                                                    .size(crate::theme::size::SMALL)
+                                                    .monospace()
+                                                    .color(p::CYAN),
+                                            );
+                                        }
+                                        None => {
+                                            ui.label(
+                                                RichText::new(icons::DASH)
+                                                    .size(crate::theme::size::SMALL)
+                                                    .color(p::TEXT_FAINT),
+                                            );
+                                        }
+                                    });
                                 }
-                            });
+                                ProcCol::Threads => {
+                                    row.col(|ui| {
+                                        ui.label(
+                                            RichText::new(proc.threads.to_string())
+                                                .size(crate::theme::size::SMALL)
+                                                .monospace()
+                                                .color(p::TEXT_FAINT),
+                                        );
+                                    });
+                                }
+                                ProcCol::Handles => {
+                                    row.col(|ui| {
+                                        ui.label(
+                                            RichText::new(proc.handles.to_string())
+                                                .size(crate::theme::size::SMALL)
+                                                .monospace()
+                                                .color(p::TEXT_FAINT),
+                                        );
+                                    });
+                                }
+                                ProcCol::Session => {
+                                    row.col(|ui| {
+                                        ui.label(
+                                            RichText::new(proc.session_id.to_string())
+                                                .size(crate::theme::size::SMALL)
+                                                .monospace()
+                                                .color(p::TEXT_FAINT),
+                                        );
+                                    });
+                                }
+                                ProcCol::Signature => {
+                                    row.col(|ui| match &proc.signature {
+                                        Some(sig) => {
+                                            let (icon, color, tip) = match sig.status {
+                                                core_pulse_core::model::SigStatus::Valid => (
+                                                    icons::CHECK,
+                                                    p::GREEN,
+                                                    sig.publisher
+                                                        .clone()
+                                                        .unwrap_or_else(|| "signed".into()),
+                                                ),
+                                                core_pulse_core::model::SigStatus::Invalid => (
+                                                    icons::CROSS,
+                                                    p::RED,
+                                                    "signature invalid".into(),
+                                                ),
+                                                core_pulse_core::model::SigStatus::Unsigned => (
+                                                    icons::DASH,
+                                                    p::TEXT_FAINT,
+                                                    "not signed".into(),
+                                                ),
+                                                core_pulse_core::model::SigStatus::Unknown => (
+                                                    "?",
+                                                    p::TEXT_FAINT,
+                                                    "not yet verified".into(),
+                                                ),
+                                            };
+                                            ui.label(RichText::new(icon).color(color))
+                                                .on_hover_text(tip);
+                                        }
+                                        None => {
+                                            ui.label(
+                                                RichText::new(icons::PENDING).color(p::TEXT_FAINT),
+                                            )
+                                            .on_hover_text("waiting for verification");
+                                        }
+                                    });
+                                }
+                            }
                         }
 
                         let resp = row.response();
@@ -1965,11 +2312,32 @@ impl App {
                 });
                 ui.add_space(2.0);
                 if temps.is_empty() {
-                    widgets::empty_state(
-                        ui,
-                        "No temperature reading available",
-                        "This firmware exposes no ACPI thermal zone, and disk SMART needs the elevated helper.",
-                    );
+                    let has_smart_elevation = s.sensor_status.iter().any(|st| {
+                        st.provider == "smart"
+                            && matches!(
+                                st.availability,
+                                core_pulse_core::model::SensorAvailability::NeedsElevation
+                            )
+                    });
+                    let cpu_unavailable = s.sensor_status.iter().any(|st| {
+                        st.provider == "acpi-pdh"
+                            && matches!(
+                                st.availability,
+                                core_pulse_core::model::SensorAvailability::NotAvailable { .. }
+                            )
+                    });
+                    let detail = if has_smart_elevation && cpu_unavailable {
+                        "CPU temperature is not exposed by ACPI firmware on this machine. \
+                         Disk SMART temperature is available via the elevated helper."
+                    } else if has_smart_elevation {
+                        "Disk SMART needs the elevated helper. Check provider status on the right."
+                    } else if cpu_unavailable {
+                        "CPU temperature is not exposed by ACPI firmware on this machine. \
+                         Check provider status for other sources (helper/GPU/bridge)."
+                    } else {
+                        "No active temperature source. Check provider status and actions on the right."
+                    };
+                    widgets::empty_state(ui, "No temperature reading available", detail);
                     ui.add_space(4.0);
                     ui.separator();
                     ui.add_space(4.0);
@@ -1985,8 +2353,8 @@ impl App {
                             "Same data, no UAC at next launch. Auto-start, LocalSystem, removable from Services.",
                         ),
                         (
-                            "3. Enable the LHM bridge",
-                            "Only if you already run LibreHardwareMonitor with its web server on port 8085.",
+                            "3. Enable the third-party bridge",
+                            "Use the \"Third-party bridge (LHM)\" toggle in the toolbar if you run LibreHardwareMonitor with its web server on 127.0.0.1:8085. Data is opt-in and marked ThirdParty.",
                         ),
                     ] {
                         ui.horizontal(|ui| {
@@ -2087,67 +2455,21 @@ impl App {
                         .filter(|x| matches!(x.availability, SensorAvailability::Available))
                         .count();
                     ui.label(
-                        RichText::new(format!(
-                            "{available}/{} available",
-                            s.sensor_status.len()
-                        ))
-                        .size(crate::theme::size::MICRO)
-                        .color(p::TEXT_FAINT),
+                        RichText::new(format!("{available}/{} available", s.sensor_status.len()))
+                            .size(crate::theme::size::MICRO)
+                            .color(p::TEXT_FAINT),
                     );
                 });
                 ui.add_space(2.0);
                 for st in &s.sensor_status {
-                    let (dot_color, text, detail) = match &st.availability {
-                        SensorAvailability::Available => {
-                            (p::GREEN, "available".to_string(), String::new())
-                        }
-                        SensorAvailability::NeedsElevation => (
-                            p::AMBER,
-                            "needs elevation".to_string(),
-                            "Run the helper to unlock".to_string(),
-                        ),
-                        SensorAvailability::NotAvailable { reason } => {
-                            (p::TEXT_FAINT, "unavailable".to_string(), reason.clone())
-                        }
-                        SensorAvailability::Failed { error } => {
-                            (p::RED, "failed".to_string(), error.clone())
-                        }
-                    };
-                    ui.horizontal(|ui| {
-                        widgets::dot(ui, dot_color, false);
-                        ui.add_sized(
-                            [96.0, 15.0],
-                            egui::Label::new(
-                                RichText::new(&st.provider)
-                                    .size(crate::theme::size::SMALL)
-                                    .monospace()
-                                    .color(p::TEXT_DIM),
-                            ),
-                        );
-                        ui.label(RichText::new(text).size(crate::theme::size::SMALL).color(dot_color));
-                    });
-                    if !detail.is_empty() {
-                        // Indent to align with the provider name, not with the
-                        // dot. Raw leading spaces are fragile because they
-                        // depend on the font's space width.
-                        ui.horizontal(|ui| {
-                            ui.add_space(18.0);
-                            ui.add(
-                                egui::Label::new(
-                                    RichText::new(detail)
-                                        .size(crate::theme::size::MICRO)
-                                        .color(p::TEXT_FAINT),
-                                )
-                                .wrap(),
-                            );
-                        });
-                    }
+                    self.provider_status_row(ui, st);
                 }
 
                 ui.add_space(6.0);
                 ui.separator();
                 ui.add_space(6.0);
                 self.helper_controls(ui, &s);
+                self.bridge_controls(ui, &s);
             });
         });
 
@@ -2283,6 +2605,73 @@ impl App {
             }
         }
 
+        // Always show Diagnose (background thread, no UAC).
+        ui.add_space(4.0);
+        ui.horizontal(|ui| {
+            let label = if self.state.helper_diagnosing {
+                "Diagnosing…"
+            } else {
+                "Diagnose (helper)"
+            };
+            if ui
+                .add_enabled(
+                    !self.state.helper_diagnosing,
+                    egui::Button::new(label).small(),
+                )
+                .on_hover_text(
+                    "Same check as `core-pulse-cli helper`: expected path, connected PID/version/elevated, provider status and readings. Runs in the background; no UAC.",
+                )
+                .clicked()
+            {
+                self.run_helper_diagnose();
+            }
+            if let Some(act) = &self.state.helper_action {
+                let color = if act.is_error { p::RED } else { p::GREEN };
+                ui.label(
+                    RichText::new(format!(
+                        "last {}",
+                        format::clock_hms(act.at_unix_ms)
+                    ))
+                    .size(crate::theme::size::MICRO)
+                    .color(color),
+                )
+                .on_hover_text(act.text.clone());
+            }
+        });
+        if let Some(act) = &self.state.helper_action {
+            let color = if act.is_error { p::RED } else { p::GREEN };
+            ui.add(
+                egui::Label::new(
+                    RichText::new(act.text.clone())
+                        .size(crate::theme::size::MICRO)
+                        .color(color),
+                )
+                .wrap(),
+            );
+        }
+        if let Some(diag) = &self.state.helper_diagnose {
+            let color = if diag.is_error { p::RED } else { p::TEXT_DIM };
+            ui.add_space(2.0);
+            ui.add(
+                egui::Label::new(
+                    RichText::new(format!(
+                        "diagnose {}: {}",
+                        format::clock_hms(diag.at_unix_ms),
+                        diag.text
+                    ))
+                    .size(crate::theme::size::MICRO)
+                    .color(color),
+                )
+                .wrap(),
+            );
+        } else if self.state.helper_diagnosing {
+            ui.label(
+                RichText::new("Diagnosing helper…")
+                    .size(crate::theme::size::MICRO)
+                    .color(p::TEXT_FAINT),
+            );
+        }
+
         let helper_usable = matches!(status, Some(SensorAvailability::Available));
         if !helper_usable {
             ui.add_space(4.0);
@@ -2293,34 +2682,183 @@ impl App {
                     .clicked()
                 {
                     match elevate::launch_helper("--serve", false) {
-                        Ok(()) => self
-                            .state
-                            .set_feedback("UAC prompt opened — approve to start the helper", false),
-                        Err(e) => self.state.set_feedback(format!("failed: {e}"), true),
+                        Ok(()) => self.state.set_helper_action(
+                            "UAC prompt opened — approve to start the helper",
+                            false,
+                        ),
+                        Err(e) => self.state.set_helper_action(format!("failed: {e}"), true),
                     }
                 }
                 if ui
                     .button("Install service (UAC)")
                     .on_hover_text(
                         "Installs the helper as a Windows Service (auto-start, LocalSystem). \
-                         One UAC prompt; no further prompts after that.",
+                         One UAC prompt; no further prompts after that.\n\n\
+                         Security note: the current per-user install layout may place the service \
+                         binary in a user-writable directory. On multi-user machines, prefer \
+                         a foreground helper session or an admin-only install location.",
                     )
                     .clicked()
                 {
                     match elevate::launch_helper("--install-service", false) {
-                        Ok(()) => self.state.set_feedback(
+                        Ok(()) => self.state.set_helper_action(
                             "UAC prompt opened — approve to install the helper service",
                             false,
                         ),
-                        Err(e) => self.state.set_feedback(format!("failed: {e}"), true),
+                        Err(e) => self.state.set_helper_action(format!("failed: {e}"), true),
                     }
                 }
             });
         }
     }
-}
 
-impl App {
+    fn provider_status_row(
+        &mut self,
+        ui: &mut egui::Ui,
+        st: &core_pulse_core::model::SensorStatus,
+    ) {
+        use core_pulse_core::model::SensorAvailability;
+
+        let (dot_color, text, detail, action) = match &st.availability {
+            SensorAvailability::Available => (p::GREEN, "available", String::new(), None),
+            SensorAvailability::NeedsElevation => (
+                p::AMBER,
+                "needs elevation",
+                if st.provider == "smart" {
+                    "Run the elevated helper to read SMART disk temperature.".to_string()
+                } else {
+                    "This provider needs elevated access.".to_string()
+                },
+                Some("Use helper controls below."),
+            ),
+            SensorAvailability::NotAvailable { reason } => {
+                let action = if st.provider == "acpi-pdh" {
+                    Some(
+                        "Not fixable in software on this firmware. Use the LHM bridge only if you run LibreHardwareMonitor with admin/driver access.",
+                    )
+                } else if st.provider == "lhm-bridge" {
+                    Some(
+                        "Enable \"Third-party bridge (LHM)\" above, and run LHM with Remote Web Server on 127.0.0.1:8085.",
+                    )
+                } else if st.provider == "gpu-vendor" {
+                    Some(
+                        "GPU temperature needs a working vendor driver/SDK (NVML for NVIDIA, IGCL for Intel). Check driver status.",
+                    )
+                } else {
+                    None
+                };
+                (p::TEXT_FAINT, "unavailable", reason.clone(), action)
+            }
+            SensorAvailability::Failed { error } => {
+                let action = if st.provider == "gpu-vendor" {
+                    Some(
+                        "Driver/SDK failed to initialize. NVIDIA: verify nvidia-smi/driver communication. Intel: IGCL temperature read is not implemented/fails closed.",
+                    )
+                } else if st.provider == "helper" {
+                    Some(
+                        "Use \"Start helper (UAC)\" below, or run `core-pulse-cli helper` for diagnosis.",
+                    )
+                } else {
+                    Some("Check logs/diagnostics; this source failed closed without fake values.")
+                };
+                (p::RED, "failed", error.clone(), action)
+            }
+        };
+
+        ui.horizontal(|ui| {
+            widgets::dot(ui, dot_color, false);
+            ui.add_sized(
+                [96.0, 15.0],
+                egui::Label::new(
+                    RichText::new(&st.provider)
+                        .size(crate::theme::size::SMALL)
+                        .monospace()
+                        .color(p::TEXT_DIM),
+                ),
+            );
+            ui.label(
+                RichText::new(text)
+                    .size(crate::theme::size::SMALL)
+                    .color(dot_color),
+            );
+        });
+        if !detail.is_empty() {
+            ui.horizontal(|ui| {
+                ui.add_space(18.0);
+                ui.add(
+                    egui::Label::new(
+                        RichText::new(detail)
+                            .size(crate::theme::size::MICRO)
+                            .color(p::TEXT_FAINT),
+                    )
+                    .wrap(),
+                );
+            });
+        }
+        if let Some(action) = action {
+            ui.horizontal(|ui| {
+                ui.add_space(18.0);
+                ui.add(
+                    egui::Label::new(
+                        RichText::new(format!("Next: {action}"))
+                            .size(crate::theme::size::MICRO)
+                            .color(p::CYAN),
+                    )
+                    .wrap(),
+                );
+            });
+        }
+        ui.add_space(2.0);
+    }
+
+    fn bridge_controls(&mut self, ui: &mut egui::Ui, s: &core_pulse_core::model::Snapshot) {
+        use core_pulse_core::model::SensorAvailability;
+        let status = s
+            .sensor_status
+            .iter()
+            .find(|st| st.provider == "lhm-bridge")
+            .map(|st| &st.availability);
+        ui.add_space(4.0);
+        widgets::kicker(ui, "Third-party bridge");
+        ui.add_space(2.0);
+        match status {
+            Some(SensorAvailability::Available) => {
+                ui.label(
+                    RichText::new("LHM bridge is active (ThirdParty data).")
+                        .size(crate::theme::size::SMALL)
+                        .color(p::GREEN),
+                );
+            }
+            Some(SensorAvailability::NotAvailable { .. }) if self.state.bridge_enabled => {
+                ui.label(
+                    RichText::new(
+                        "Bridge enabled, but LibreHardwareMonitor is not reachable at 127.0.0.1:8085. \
+                         Start LHM and enable its Remote Web Server.",
+                    )
+                    .size(crate::theme::size::SMALL)
+                    .color(p::AMBER),
+                );
+            }
+            Some(SensorAvailability::Failed { error }) => {
+                ui.label(
+                    RichText::new(format!("Bridge failed: {error}"))
+                        .size(crate::theme::size::SMALL)
+                        .color(p::RED),
+                );
+            }
+            _ => {
+                ui.label(
+                    RichText::new(
+                        "Off by default. Enable it only if you trust a local LibreHardwareMonitor instance. \
+                         core-pulse reads localhost JSON only and never writes commands.",
+                    )
+                    .size(crate::theme::size::SMALL)
+                    .color(p::TEXT_FAINT),
+                );
+            }
+        }
+    }
+
     fn services(&mut self, ui: &mut egui::Ui) {
         let s = Arc::clone(&self.state.snapshot);
         if s.services.is_empty() {
@@ -2785,6 +3323,72 @@ impl App {
 
 impl App {
     /// Confirmation dialog for a pending action.
+    fn degraded_window(&mut self, ctx: &egui::Context) {
+        if !self.state.show_degraded_details {
+            return;
+        }
+        let mut open = self.state.show_degraded_details;
+        egui::Window::new("Degraded sources")
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(true)
+            .default_width(520.0)
+            .show(ctx, |ui| {
+                let s = Arc::clone(&self.state.snapshot);
+                if s.degraded.is_empty() {
+                    ui.label(
+                        RichText::new("No degraded sources. All reported sources are nominal or unavailable by design.")
+                            .size(crate::theme::size::SMALL)
+                            .color(p::TEXT_DIM),
+                    );
+                } else {
+                    ui.label(
+                        RichText::new(
+                            "These entries explain missing or failed data. core-pulse does not fabricate values.",
+                        )
+                        .size(crate::theme::size::MICRO)
+                        .color(p::TEXT_FAINT),
+                    );
+                    ui.add_space(6.0);
+                    for d in &s.degraded {
+                        let color = match d.reason {
+                            core_pulse_core::model::DegradeReason::NeedsElevation => p::AMBER,
+                            core_pulse_core::model::DegradeReason::NotAvailable => p::TEXT_FAINT,
+                            core_pulse_core::model::DegradeReason::ApiFailed => p::RED,
+                            core_pulse_core::model::DegradeReason::Timeout => p::RED,
+                            _ => p::AMBER,
+                        };
+                        ui.horizontal(|ui| {
+                            widgets::dot(ui, color, false);
+                            ui.label(
+                                RichText::new(format!("{:?} / {:?}", d.area, d.reason))
+                                    .size(crate::theme::size::SMALL)
+                                    .color(color),
+                            );
+                        });
+                        ui.horizontal(|ui| {
+                            ui.add_space(18.0);
+                            ui.add(
+                                egui::Label::new(
+                                    RichText::new(&d.detail)
+                                        .size(crate::theme::size::MICRO)
+                                        .color(p::TEXT_DIM),
+                                )
+                                .wrap(),
+                            );
+                        });
+                        ui.add_space(4.0);
+                    }
+                    ui.separator();
+                    if ui.button("Open Sensors").clicked() {
+                        self.state.tab = Tab::Sensors;
+                        self.state.show_degraded_details = false;
+                    }
+                }
+            });
+        self.state.show_degraded_details = open;
+    }
+
     fn confirmation_dialog(&mut self, ctx: &egui::Context) {
         let Some(pending) = self.state.pending.clone() else {
             return;

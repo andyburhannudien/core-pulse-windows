@@ -22,6 +22,10 @@ pub const MAX_MESSAGE_BYTES: u32 = 1024 * 1024;
 
 pub const PIPE_NAME: &str = r"\\.\pipe\core-pulse-v1";
 
+/// Nama Windows Service untuk helper. Dipakai saat instalasi service dan saat
+/// klien memverifikasi pipe milik service LocalSystem (lihat `pipe::service_process`).
+pub const HELPER_SERVICE_NAME: &str = "core-pulse-helper";
+
 /// Nama pipe tanpa prefix, untuk `CreateNamedPipeW`.
 pub const PIPE_PATH: &str = r"\\.\pipe\core-pulse-v1";
 

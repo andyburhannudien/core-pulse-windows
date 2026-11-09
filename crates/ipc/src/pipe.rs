@@ -33,6 +33,11 @@ use windows::Win32::System::Pipes::{
     PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_BYTE, PIPE_UNLIMITED_INSTANCES, PIPE_WAIT,
     WaitNamedPipeW,
 };
+use windows::Win32::System::Services::{
+    CloseServiceHandle, OpenSCManagerW, OpenServiceW, QUERY_SERVICE_CONFIGW, QueryServiceConfigW,
+    QueryServiceStatusEx, SC_HANDLE, SC_MANAGER_CONNECT, SC_STATUS_PROCESS_INFO,
+    SERVICE_QUERY_CONFIG, SERVICE_QUERY_STATUS, SERVICE_RUNNING, SERVICE_STATUS_PROCESS,
+};
 use windows::Win32::System::Threading::{
     OpenProcess, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION, QueryFullProcessImageNameW,
     WaitForSingleObject,
@@ -625,6 +630,134 @@ impl Drop for PipeClient {
     }
 }
 
+/// Proses yang menjalankan sebuah Windows Service, beserta executable yang
+/// dikonfigurasi di SCM.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ServiceProcess {
+    pub pid: u32,
+    pub image_path: std::path::PathBuf,
+}
+
+/// PID dan binary path sebuah service yang sedang berjalan.
+///
+/// Ini jalur verifikasi cadangan untuk helper `LocalSystem`: user biasa tidak
+/// boleh `OpenProcess` proses SYSTEM, tetapi SCM tetap bisa dibaca dengan
+/// `SERVICE_QUERY_STATUS | SERVICE_QUERY_CONFIG`.
+///
+/// `None` jika service tidak ada, tidak berjalan, atau SCM menolak query.
+/// `image_path` hanya executable-nya: tanda kutip dan argumen (mis.
+/// `--service`) dibuang.
+pub fn service_process(service_name: &str) -> Option<ServiceProcess> {
+    let name: Vec<u16> = service_name
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect();
+
+    // SAFETY: nama service NUL-terminated; hanya membuka SCM lokal.
+    let scm = unsafe { OpenSCManagerW(PCWSTR::null(), PCWSTR::null(), SC_MANAGER_CONNECT) }.ok()?;
+
+    // SAFETY: `scm` valid dan nama NUL-terminated.
+    let service = unsafe {
+        OpenServiceW(
+            scm,
+            PCWSTR(name.as_ptr()),
+            SERVICE_QUERY_STATUS | SERVICE_QUERY_CONFIG,
+        )
+    };
+
+    let result = service.ok().and_then(|service| {
+        let process = query_running_service(service);
+        // SAFETY: handle dibuka di atas dan tidak dipakai lagi.
+        unsafe {
+            let _ = CloseServiceHandle(service);
+        }
+        process
+    });
+
+    // SAFETY: handle dibuka di atas dan tidak dipakai lagi.
+    unsafe {
+        let _ = CloseServiceHandle(scm);
+    }
+    result
+}
+
+/// Query status proses lalu konfigurasi binary dari satu service.
+fn query_running_service(service: SC_HANDLE) -> Option<ServiceProcess> {
+    let mut status = SERVICE_STATUS_PROCESS::default();
+    let mut needed = 0u32;
+    let size = std::mem::size_of::<SERVICE_STATUS_PROCESS>();
+    // SAFETY: `status` valid dan berukuran `size`; slice hanya hidup selama
+    // panggilan dan tidak dipakai setelahnya.
+    let bytes = unsafe {
+        std::slice::from_raw_parts_mut(std::ptr::from_mut(&mut status).cast::<u8>(), size)
+    };
+    // SAFETY: buffer cukup besar untuk SERVICE_STATUS_PROCESS.
+    unsafe { QueryServiceStatusEx(service, SC_STATUS_PROCESS_INFO, Some(bytes), &mut needed) }
+        .ok()?;
+
+    if status.dwCurrentState != SERVICE_RUNNING || status.dwProcessId == 0 {
+        return None;
+    }
+
+    let image_path = query_service_image_path(service)?;
+    Some(ServiceProcess {
+        pid: status.dwProcessId,
+        image_path,
+    })
+}
+
+fn query_service_image_path(service: SC_HANDLE) -> Option<std::path::PathBuf> {
+    let mut needed = 0u32;
+    // Panggilan pertama sengaja gagal dengan ERROR_INSUFFICIENT_BUFFER untuk
+    // mendapatkan ukuran buffer.
+    // SAFETY: out-param valid; tidak ada buffer untuk ditulis.
+    let _ = unsafe { QueryServiceConfigW(service, None, 0, &mut needed) };
+    if needed == 0 {
+        return None;
+    }
+
+    // `Vec<usize>` memberi alignment yang cukup untuk struct berisi pointer.
+    let mut buffer = vec![0usize; (needed as usize).div_ceil(std::mem::size_of::<usize>())];
+    let config = buffer.as_mut_ptr().cast::<QUERY_SERVICE_CONFIGW>();
+    // SAFETY: buffer minimal `needed` byte dan cukup aligned.
+    unsafe { QueryServiceConfigW(service, Some(config), needed, &mut needed) }.ok()?;
+    // SAFETY: SCM mengisi `lpBinaryPathName` menunjuk ke string di `buffer`,
+    // yang masih hidup selama konversi ini.
+    let raw = unsafe { (*config).lpBinaryPathName.to_string() }.ok()?;
+    parse_service_binary_path(&raw)
+}
+
+/// Ambil executable dari `lpBinaryPathName` yang disimpan SCM. Nilainya berupa
+/// command line utuh, mis. `"C:\...\core-pulse-helper.exe" --service`.
+fn parse_service_binary_path(raw: &str) -> Option<std::path::PathBuf> {
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return None;
+    }
+
+    if let Some(rest) = raw.strip_prefix('"') {
+        let end = rest.find('"')?;
+        if end == 0 {
+            return None;
+        }
+        return Some(std::path::PathBuf::from(&rest[..end]));
+    }
+
+    // Tidak dikutip: path bisa mengandung spasi. Coba prefix terpanjang yang
+    // benar-benar ada sebagai file sebelum jatuh ke token pertama. Kalau ragu,
+    // token pertama membuat verifikasi gagal-tertutup (deny), bukan lolos.
+    if std::path::Path::new(raw).is_file() {
+        return Some(std::path::PathBuf::from(raw));
+    }
+    for (index, _) in raw.match_indices(' ').rev() {
+        let candidate = &raw[..index];
+        if std::path::Path::new(candidate).is_file() {
+            return Some(std::path::PathBuf::from(candidate));
+        }
+    }
+    raw.split_whitespace().next().map(std::path::PathBuf::from)
+}
+
 /// Batas ukuran payload yang bisa diterima helper; dipakai di test.
 pub const fn max_payload() -> u32 {
     MAX_MESSAGE_BYTES
@@ -761,6 +894,45 @@ mod tests {
             "path proses sendiri harus cocok: {} vs {}",
             actual.display(),
             expected.display()
+        );
+    }
+
+    #[test]
+    fn service_binary_path_strips_quotes_and_arguments() {
+        assert_eq!(
+            parse_service_binary_path(
+                r#""C:\Program Files\core-pulse\core-pulse-helper.exe" --service"#
+            ),
+            Some(std::path::PathBuf::from(
+                r"C:\Program Files\core-pulse\core-pulse-helper.exe"
+            ))
+        );
+    }
+
+    #[test]
+    fn service_binary_path_accepts_unquoted_executable() {
+        assert_eq!(
+            parse_service_binary_path(r"C:\core-pulse\core-pulse-helper.exe --service"),
+            Some(std::path::PathBuf::from(
+                r"C:\core-pulse\core-pulse-helper.exe"
+            ))
+        );
+    }
+
+    #[test]
+    fn service_binary_path_rejects_empty_and_unterminated_quotes() {
+        assert_eq!(parse_service_binary_path(""), None);
+        assert_eq!(parse_service_binary_path("   "), None);
+        assert_eq!(parse_service_binary_path(r#""C:\helper.exe"#), None);
+        assert_eq!(parse_service_binary_path(r#""" --service"#), None);
+    }
+
+    #[test]
+    fn missing_service_has_no_process() {
+        let name = format!("core-pulse-missing-service-{}", std::process::id());
+        assert!(
+            service_process(&name).is_none(),
+            "service yang tidak ada tidak boleh menghasilkan proses"
         );
     }
 

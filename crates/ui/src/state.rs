@@ -104,12 +104,58 @@ pub struct ActionFeedback {
     pub shown_at: std::time::Instant,
 }
 
+/// Last helper/UAC action, kept until replaced (does not expire like feedback).
+#[derive(Debug, Clone)]
+pub struct HelperAction {
+    pub text: String,
+    pub is_error: bool,
+    pub at_unix_ms: u64,
+}
+
+/// Last helper diagnosis result (from `fetch_once`, like `core-pulse-cli helper`).
+#[derive(Debug, Clone)]
+pub struct HelperDiagnose {
+    pub text: String,
+    pub is_error: bool,
+    pub at_unix_ms: u64,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SortKey {
     Cpu,
     Memory,
     Name,
     Pid,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ProcessDensity {
+    #[default]
+    Compact,
+    Comfort,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct ProcessColumns {
+    pub path: bool,
+    pub io: bool,
+    pub gpu: bool,
+    pub threads: bool,
+    pub handles: bool,
+    pub session: bool,
+}
+
+impl Default for ProcessColumns {
+    fn default() -> Self {
+        Self {
+            path: true,
+            io: true,
+            gpu: true,
+            threads: true,
+            handles: true,
+            session: true,
+        }
+    }
 }
 
 impl SortKey {
@@ -209,6 +255,23 @@ pub struct AppState {
     /// Separate filter for the Services tab, so switching tabs never carries a
     /// process filter into a service list.
     pub service_search: String,
+    /// Opt-in third-party bridge (LibreHardwareMonitor). Runtime toggle; default
+    /// off unless started with --bridge / CORE_PULSE_LHM_BRIDGE=1.
+    pub bridge_enabled: bool,
+    pub process_density: ProcessDensity,
+    pub process_columns: ProcessColumns,
+    /// Show degraded-source details window.
+    pub show_degraded_details: bool,
+    /// Quick process filters (View menu).
+    pub filter_cpu_hot: bool,
+    pub filter_elevated: bool,
+    pub filter_unsigned: bool,
+    /// Persistent log of last helper/UAC action.
+    pub helper_action: Option<HelperAction>,
+    /// Persistent result of last helper diagnosis.
+    pub helper_diagnose: Option<HelperDiagnose>,
+    /// True while a background diagnosis is running.
+    pub helper_diagnosing: bool,
 }
 
 impl Default for AppState {
@@ -230,6 +293,16 @@ impl Default for AppState {
             alerts: Arc::new(AlertState::default()),
             sensor_hot_only: false,
             service_search: String::new(),
+            bridge_enabled: false,
+            process_density: ProcessDensity::default(),
+            process_columns: ProcessColumns::default(),
+            show_degraded_details: false,
+            filter_cpu_hot: false,
+            filter_elevated: false,
+            filter_unsigned: false,
+            helper_action: None,
+            helper_diagnose: None,
+            helper_diagnosing: false,
         }
     }
 }
@@ -293,6 +366,18 @@ impl AppState {
             // PID 0 is idle: showing it at the top of the list is noise.
             .filter(|p| p.pid != 0)
             .filter(|p| self.show_system || !is_system(p))
+            .filter(|p| !self.filter_cpu_hot || p.cpu_percent >= 5.0)
+            .filter(|p| !self.filter_elevated || p.elevated == Some(true))
+            .filter(|p| {
+                if !self.filter_unsigned {
+                    return true;
+                }
+                matches!(
+                    p.signature.as_ref().map(|s| s.status),
+                    Some(core_pulse_core::model::SigStatus::Unsigned)
+                        | Some(core_pulse_core::model::SigStatus::Invalid)
+                )
+            })
             .filter(|p| {
                 if needle.is_empty() {
                     return true;
@@ -324,6 +409,26 @@ impl AppState {
             // Numeric columns start at the largest value; text starts at A.
             self.sort_asc = !key.is_numeric();
         }
+    }
+
+    pub fn set_helper_action(&mut self, text: impl Into<String>, is_error: bool) {
+        let at_unix_ms = core_pulse_core::sampler::now_unix_ms();
+        self.helper_action = Some(HelperAction {
+            text: text.into(),
+            is_error,
+            at_unix_ms,
+        });
+        self.set_feedback(self.helper_action.as_ref().unwrap().text.clone(), is_error);
+    }
+
+    pub fn set_helper_diagnose(&mut self, text: impl Into<String>, is_error: bool) {
+        let at_unix_ms = core_pulse_core::sampler::now_unix_ms();
+        self.helper_diagnose = Some(HelperDiagnose {
+            text: text.into(),
+            is_error,
+            at_unix_ms,
+        });
+        self.helper_diagnosing = false;
     }
 
     /// Row for the detail panel.
@@ -423,6 +528,39 @@ mod tests {
         s.show_system = true;
         let names: Vec<_> = s.visible_rows().iter().map(|r| r.name.clone()).collect();
         assert_eq!(names, vec!["b.exe", "c.exe", "a.exe"]);
+    }
+
+    #[test]
+    fn quick_filters_hide_rows() {
+        let mut elev = row(3, "elev.exe", 0.5, 10);
+        elev.elevated = Some(true);
+        let mut unsigned = row(4, "unsigned.exe", 0.5, 10);
+        unsigned.signature = Some(core_pulse_core::model::Signature {
+            status: core_pulse_core::model::SigStatus::Unsigned,
+            publisher: None,
+        });
+        let mut s = state_with(vec![
+            row(1, "idle.exe", 0.5, 10),
+            row(2, "hot.exe", 12.0, 10),
+            elev,
+            unsigned,
+        ]);
+        s.show_system = true;
+        assert_eq!(s.visible_rows().len(), 4);
+
+        s.filter_cpu_hot = true;
+        let names: Vec<_> = s.visible_rows().iter().map(|r| r.name.clone()).collect();
+        assert_eq!(names, vec!["hot.exe"]);
+        s.filter_cpu_hot = false;
+
+        s.filter_elevated = true;
+        let names: Vec<_> = s.visible_rows().iter().map(|r| r.name.clone()).collect();
+        assert_eq!(names, vec!["elev.exe"]);
+        s.filter_elevated = false;
+
+        s.filter_unsigned = true;
+        let names: Vec<_> = s.visible_rows().iter().map(|r| r.name.clone()).collect();
+        assert_eq!(names, vec!["unsigned.exe"]);
     }
 
     #[test]

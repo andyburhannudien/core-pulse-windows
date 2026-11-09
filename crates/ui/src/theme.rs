@@ -23,8 +23,8 @@ pub mod palette {
     pub const BORDER_STRONG: Color32 = Color32::from_rgb(0x3A, 0x41, 0x4D);
 
     pub const TEXT: Color32 = Color32::from_rgb(0xE4, 0xE8, 0xEF);
-    pub const TEXT_DIM: Color32 = Color32::from_rgb(0x9A, 0xA3, 0xB2);
-    pub const TEXT_FAINT: Color32 = Color32::from_rgb(0x6C, 0x75, 0x85);
+    pub const TEXT_DIM: Color32 = Color32::from_rgb(0xA8, 0xB1, 0xC0);
+    pub const TEXT_FAINT: Color32 = Color32::from_rgb(0x7E, 0x88, 0x98);
 
     pub const ACCENT: Color32 = Color32::from_rgb(0x4C, 0x9E, 0xFF);
     pub const ACCENT_DIM: Color32 = Color32::from_rgb(0x2B, 0x4C, 0x74);

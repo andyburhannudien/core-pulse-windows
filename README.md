@@ -56,11 +56,11 @@ fabricated number.*
 | Gate G2 (process actions + PID reuse) | **PASS** — [P2-RESULTS.md](docs/P2-RESULTS.md) |
 | Gate G3 (sensors + SMART) | **Partial** — [P3-RESULTS.md](docs/P3-RESULTS.md) |
 | Gate G4 (helper resilience + malformed IPC) | **PASS (non-elevated)** — [P4-RESULTS.md](docs/P4-RESULTS.md) |
-| Sensor framework + SMART + GPU | **Working** — disk temperature awaits the helper |
+| Sensor framework + SMART + GPU | **Working** — disk temperatures via SMART; CPU ACPI and NVIDIA driver unavailable on this machine |
 | Sensors tab | **Working** — per-provider status, explicit elevation buttons |
 | Alert engine | **Working** — sustained thresholds, dedup, 5-minute cooldown |
 | Elevated helper | **Working** — foreground, service, and probe modes |
-| Installer | Not yet — P5 |
+| Installer | **Working** — per-user NSIS + portable ZIP (P5) |
 
 Measured on the development machine (i5-9500T, 8 GB, build 26100):
 
@@ -120,6 +120,24 @@ Start-Process .\target\debug\core-pulse-helper.exe -Verb RunAs -ArgumentList "--
 The helper protocol is read-only. It never accepts a client-supplied path or
 command, so a compromised UI process cannot ask it to touch arbitrary devices.
 
+## Packaging
+
+The release toolchain is portable and lives outside the repository. Verify it
+first, then build the two distribution formats:
+
+```powershell
+.\scripts\check-deps.ps1          # Rust, MSVC, Windows SDK, crate cache, NSIS
+.\build.ps1 -Target Portable      # artifacts\core-pulse-<version>-windows-x64-portable.zip
+.\build.ps1 -Target Installer     # artifacts\core-pulse-<version>-windows-x64-setup.exe
+.\build.ps1                       # build + test + portable + installer
+```
+
+The installer is per-user: `RequestExecutionLevel user`, default directory
+`%LOCALAPPDATA%\Programs\core-pulse`, and no UAC prompt at install or startup.
+The portable ZIP needs no installer and no registry writes. Both are written to
+`artifacts/` with a `SHA256SUMS.txt`; setup details are in
+[docs/BUILD-DEPENDENCIES.md](docs/BUILD-DEPENDENCIES.md).
+
 ## Keyboard shortcuts
 
 | Shortcut | Action |
@@ -149,6 +167,7 @@ command, so a compromised UI process cannot ask it to touch arbitrary devices.
 | [docs/ENVIRONMENT-AUDIT.md](docs/ENVIRONMENT-AUDIT.md) | Development machine audit (facts, not assumptions) |
 | [docs/ROADMAP.md](docs/ROADMAP.md) | Phases P0–P5 and their gates |
 | [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) | Toolchain setup, build commands, troubleshooting |
+| [docs/BUILD-DEPENDENCIES.md](docs/BUILD-DEPENDENCIES.md) | Portable toolchain, crate cache, packaging, offline builds |
 | [docs/ADR/](docs/ADR/README.md) | Architecture Decision Records |
 | [docs/OPEN-QUESTIONS.md](docs/OPEN-QUESTIONS.md) | Decisions still awaiting an answer |
 

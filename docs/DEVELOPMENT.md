@@ -18,6 +18,12 @@ cargo --version
 cargo clippy --version
 ```
 
+On this checkout the toolchain is portable: Rust lives in
+`<repo>\..\..\Tools\rust` and the scripts wire `RUSTUP_HOME`, `CARGO_HOME` and
+`PATH` automatically. Run `.\scripts\check-deps.ps1` to verify Rust, MSVC,
+Windows SDK, the crate cache and NSIS in one table. Full setup instructions are
+in [BUILD-DEPENDENCIES.md](BUILD-DEPENDENCIES.md).
+
 What you do **not** need: full Visual Studio, .NET, Node, WebView2, CMake.
 MSVC Build Tools and Windows SDK 10.0.26100 are already on the development
 machine.
@@ -37,6 +43,7 @@ core-pulse/
 ├─ rust-toolchain.toml
 ├─ clippy.toml
 ├─ deny.toml
+├─ build.ps1                # build, test, portable ZIP, NSIS installer
 ├─ crates/
 │  ├─ core/     core-pulse-core
 │  ├─ sensors/  core-pulse-sensors
@@ -44,7 +51,10 @@ core-pulse/
 │  ├─ ui/       core-pulse-ui      (bin: core-pulse.exe)
 │  ├─ helper/   core-pulse-helper  (bin: core-pulse-helper.exe)
 │  └─ cli/      core-pulse-cli     (bin: core-pulse-cli.exe)
-├─ scripts/     screenshot.ps1, capture-docs.ps1
+├─ installer/   core-pulse.nsi, core-pulse.ico
+├─ scripts/     _common.ps1, check-deps.ps1, package-portable.ps1,
+│               make-installer.ps1, make-icon.ps1, screenshot.ps1,
+│               capture-docs.ps1
 ├─ tests/fixtures/
 ├─ docs/
 └─ .github/workflows/ci.yml
@@ -69,6 +79,21 @@ cargo deny check
 cargo run -p core-pulse-cli -- bench --seconds 60   # performance budget
 cargo run -p core-pulse-cli -- record --out tests/fixtures/snapshot/x.json
 ```
+
+Packaging uses the same toolchain resolver, so it works from a normal
+PowerShell window without activating anything:
+
+```powershell
+.\scripts\check-deps.ps1          # Rust, MSVC, SDK, crate cache, NSIS
+.\build.ps1 -Target Portable      # artifacts\core-pulse-<version>-windows-x64-portable.zip
+.\build.ps1 -Target Installer     # artifacts\core-pulse-<version>-windows-x64-setup.exe
+.\build.ps1                       # build + test + portable + installer
+```
+
+The installer is per-user (`RequestExecutionLevel user`), installs under
+`%LOCALAPPDATA%\Programs\core-pulse`, and never asks for UAC. The portable ZIP
+contains the UI, CLI, helper, README and docs. Artifacts are written to
+`artifacts/`, together with `SHA256SUMS.txt`.
 
 Live checks (they touch the real machine) are CLI subcommands, not ignored
 tests, because they print evidence:
@@ -120,10 +145,11 @@ Log level is set with `CORE_PULSE_LOG=debug` (default `info`).
 
 | Symptom | Cause | Fix |
 |---|---|---|
-| `error: linker 'link.exe' not found` | MSVC environment not detected | run from *x64 Native Tools Command Prompt*, or `cmd /c "vcvars64.bat && cargo build"` |
-| `rustc` not recognised after install | PATH not refreshed | open a new terminal |
+| `error: linker 'link.exe' not found` | MSVC Build Tools not installed or not found | install the C++ workload into `<tools>\msvc` (see BUILD-DEPENDENCIES.md), then run `.\scripts\check-deps.ps1` |
+| `rustc` not recognised after install | PATH not refreshed | open a new terminal, or let `scripts\_common.ps1` set the path |
 | `error: could not compile windows-sys` | wrong target | `rustup target add x86_64-pc-windows-msvc` |
 | First build very slow | large `windows` crate + LTO | normal; subsequent incremental builds are fast |
+| `makensis` not found | NSIS portable not extracted | extract `nsis-3.13.zip` into `<tools>\nsis`, then re-run `check-deps.ps1` |
 | `cargo deny` fails on a licence | new dependency | add it to `deny.toml` only after checking the licence |
 | UI appears empty | font or first-snapshot failure | check the log; the UI must show a placeholder, not a blank window — a blank window is a bug |
 

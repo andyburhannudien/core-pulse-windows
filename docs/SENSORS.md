@@ -66,16 +66,19 @@ Ported directly from `disk-pulse`, which already has fixture-verified parsers:
   (Airflow Temperature).
 - Fallback: `IOCTL_STORAGE_PREDICT_FAILURE`, then storage reliability counters.
 
-Requires `GENERIC_READ` on `\\.\PhysicalDriveN`, which usually requires admin.
-Without the helper: `NeedsElevation`, and the UI offers an explicit
-"Start helper (UAC)" button.
+Requires `GENERIC_READ | GENERIC_WRITE` on `\\.\PhysicalDriveN`, which usually
+requires admin. `IOCTL_ATA_PASS_THROUGH` rejects a read-only handle with
+`ERROR_ACCESS_DENIED` (5), even for a read-only SMART command, so the write bit
+is mandatory. Without the helper: `NeedsElevation`, and the UI offers an
+explicit "Start helper (UAC)" button.
 
 Measured on this machine (see [P3-RESULTS.md](P3-RESULTS.md)): opening
 `\\.\PhysicalDrive0` with `GENERIC_READ` fails with `0x0005`
-(`ACCESS_DENIED`) and with access 0 with `0x0001` (`INVALID_FUNCTION`). Disk
-**model** and size are readable without admin through
-`IOCTL_STORAGE_QUERY_PROPERTY`, which is why the disk list is useful even
-unelevated — only the temperature needs the helper.
+(`ACCESS_DENIED`) and with access 0 with `0x0001` (`INVALID_FUNCTION`). With
+`GENERIC_READ | GENERIC_WRITE` the ATA SMART command succeeds (attributes
+`0xC2` and `0xBE` both return the disk temperature). Disk **model** and size are
+readable without admin through `IOCTL_STORAGE_QUERY_PROPERTY`, which is why the
+disk list is useful even unelevated — only the temperature needs the helper.
 
 ### Tier 2 — GPU
 
@@ -184,6 +187,13 @@ Merge rules, enforced by unit tests:
 3. A `helper` status is always added, carrying `Available` (elevated),
    `NeedsElevation` (running but not elevated) or a failure reason.
 4. Values outside the physical range are dropped, from either source.
+
+Before any helper data is merged, the client verifies the pipe server. Normally
+it compares the server process image path with the expected helper path. When
+the helper runs as a Windows Service (`LocalSystem`), a non-admin client cannot
+open the process; the client then reads the service PID and configured binary
+path from SCM and accepts the pipe only if **both** match `core-pulse-helper`.
+Any mismatch is `HelperError::Untrusted` and the data is discarded.
 
 ## 5. Status shown in the UI
 

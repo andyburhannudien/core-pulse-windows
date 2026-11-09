@@ -180,8 +180,9 @@ Results and evidence: [P4-RESULTS.md](P4-RESULTS.md).
 
 ## P5 — Polish (3–5 hari)
 
-- Installer: NSIS (per-user, tanpa admin) + portable ZIP. MSI hanya kalau ada
-  kebutuhan enterprise.
+- **Installer (selesai):** NSIS per-user (tanpa admin) + portable ZIP, dibangun
+  oleh `build.ps1`, `scripts\package-portable.ps1`, dan
+  `scripts\make-installer.ps1`. MSI hanya kalau ada kebutuhan enterprise.
 - Code signing kalau didistribusikan publik (lihat
   [OPEN-QUESTIONS.md](OPEN-QUESTIONS.md)).
 - Dokumentasi pengguna: README, FAQ sensor, halaman troubleshooting.
@@ -189,7 +190,8 @@ Results and evidence: [P4-RESULTS.md](P4-RESULTS.md).
 - Fuzz target: parser SMART, parser JSON IPC.
 
 **Gate G5:** install di mesin bersih (tanpa Rust, tanpa VS) berjalan tanpa admin
-dan tanpa meminta UAC saat startup.
+dan tanpa meminta UAC saat startup. Installer dan portable ZIP sudah tersedia;
+pengujian di mesin bersih masih pending.
 
 ## Ketergantungan antar fase
 
